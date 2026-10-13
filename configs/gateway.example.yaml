@@ -1,0 +1,37 @@
+opcua:
+  endpoint: "opc.tcp://plant-simulator:4840"
+  subscription_interval_ms: 1000
+
+mqtt:
+  host: "mosquitto"
+  port: 1883
+  qos: 1
+  topic_prefix: "industrial"
+
+assets:
+  - asset: "site01.line01.press01"
+    nodes:
+      - node_id: "ns=2;s=Line01.Press01.State"
+        tag: "state"
+        unit: ""
+      - node_id: "ns=2;s=Line01.Press01.Pressure"
+        tag: "pressure"
+        unit: "bar"
+      - node_id: "ns=2;s=Line01.Press01.CycleTime"
+        tag: "cycle_time"
+        unit: "s"
+      - node_id: "ns=2;s=Line01.Press01.ProductionCount"
+        tag: "production_count"
+        unit: "units"
+
+  - asset: "site01.line01.oven01"
+    nodes:
+      - node_id: "ns=2;s=Line01.Oven01.State"
+        tag: "state"
+        unit: ""
+      - node_id: "ns=2;s=Line01.Oven01.Temperature"
+        tag: "temperature"
+        unit: "degC"
+      - node_id: "ns=2;s=Line01.Oven01.ProductionCount"
+        tag: "production_count"
+        unit: "units"
