@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plant-simulator"
+version = "0.1.0"
+description = "Deterministic OPC UA plant simulator for the industrial edge gateway MVP"
+readme = "README.md"
+requires-python = ">=3.12"
+# Keep in sync with requirements.txt, which pins the full runtime tree for Docker.
+dependencies = ["asyncua==1.1.8"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "PyYAML>=6"]
+
+[project.scripts]
+plant-simulator = "plant_simulator.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

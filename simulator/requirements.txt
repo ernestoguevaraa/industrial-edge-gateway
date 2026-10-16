@@ -1,0 +1,14 @@
+# Exact runtime pins used by the Docker image (asyncua and its transitive dependencies).
+# Regenerate from a clean Python 3.12 venv: pip install asyncua==<version> && pip freeze
+aiofiles==25.1.0
+aiosqlite==0.22.1
+asyncua==1.1.8
+cffi==2.1.1
+cryptography==50.0.2
+pycparser==3.11
+pyOpenSSL==26.4.0
+python-dateutil==2.9.0.post0
+pytz==2026.5
+six==1.17.0
+sortedcontainers==2.4.0
+typing_extensions==4.16.0
