@@ -4,7 +4,7 @@ project(
   industrial_edge_gateway
   VERSION 0.1.0
   DESCRIPTION "C++20 Industrial IoT edge gateway (OPC UA -> MQTT)"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE

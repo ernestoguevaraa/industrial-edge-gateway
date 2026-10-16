@@ -33,6 +33,50 @@ set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(spdlog yaml-cpp nlohmann_json)
 
+# open62541: the official single-file (amalgamated) release assets. They carry no
+# CMakeLists.txt, so FetchContent only downloads and verifies them.
+set(GATEWAY_OPEN62541_VERSION 1.4.21)
+FetchContent_Declare(
+  open62541_header
+  URL https://github.com/open62541/open62541/releases/download/v${GATEWAY_OPEN62541_VERSION}/open62541.h
+  URL_HASH SHA256=7ccf5f199136a0223ef534fbc30b9abb165ebf89e6123e2c653680d6c8cfae81
+  DOWNLOAD_NO_EXTRACT TRUE)
+FetchContent_Declare(
+  open62541_source
+  URL https://github.com/open62541/open62541/releases/download/v${GATEWAY_OPEN62541_VERSION}/open62541.c
+  URL_HASH SHA256=cfb8966b966af867cc3e960a000884daed02ca620fc6391e4882ec1e4bfe96ea
+  DOWNLOAD_NO_EXTRACT TRUE)
+FetchContent_MakeAvailable(open62541_header open62541_source)
+
+# The amalgamation fixes its feature set at release time; fail early if it lacks what we use.
+set(open62541_h "${open62541_header_SOURCE_DIR}/open62541.h")
+foreach(required "#define UA_OPEN62541_VERSION \"v${GATEWAY_OPEN62541_VERSION}\""
+                 "#define UA_ENABLE_SUBSCRIPTIONS" "#define UA_ARCHITECTURE_POSIX")
+  file(STRINGS "${open62541_h}" found REGEX "^${required}$" LIMIT_COUNT 1)
+  if(NOT found)
+    message(FATAL_ERROR "open62541.h lacks required configuration line: ${required}")
+  endif()
+endforeach()
+
+# The release amalgamation is built with UA_ENABLE_ENCRYPTION_MBEDTLS, so it needs mbedTLS
+# even though MVP 1 only uses SecurityPolicy None (Ubuntu: libmbedtls-dev).
+find_path(MBEDTLS_INCLUDE_DIR mbedtls/ssl.h)
+find_library(MBEDTLS_LIBRARY mbedtls)
+find_library(MBEDX509_LIBRARY mbedx509)
+find_library(MBEDCRYPTO_LIBRARY mbedcrypto)
+if(NOT MBEDTLS_INCLUDE_DIR OR NOT MBEDTLS_LIBRARY OR NOT MBEDX509_LIBRARY OR NOT MBEDCRYPTO_LIBRARY)
+  message(FATAL_ERROR "mbedTLS not found; open62541 ${GATEWAY_OPEN62541_VERSION} requires it "
+                      "(install libmbedtls-dev)")
+endif()
+
+find_package(Threads REQUIRED)
+add_library(open62541 STATIC "${open62541_source_SOURCE_DIR}/open62541.c")
+target_include_directories(open62541 SYSTEM PUBLIC "${open62541_header_SOURCE_DIR}")
+target_include_directories(open62541 SYSTEM PRIVATE "${MBEDTLS_INCLUDE_DIR}")
+target_link_libraries(open62541 PUBLIC ${MBEDTLS_LIBRARY} ${MBEDX509_LIBRARY} ${MBEDCRYPTO_LIBRARY}
+                                       Threads::Threads)
+set_target_properties(open62541 PROPERTIES C_STANDARD 99 C_EXTENSIONS ON)
+
 if(GATEWAY_BUILD_TESTS)
   FetchContent_Declare(
     googletest
