@@ -8,6 +8,11 @@ target_include_directories(gateway_config PUBLIC include)
 target_link_libraries(gateway_config PRIVATE yaml-cpp::yaml-cpp)
 gateway_set_warnings(gateway_config)
 
+# SDK-neutral OPC UA client abstraction (header-only; no open62541 dependency).
+add_library(gateway_opcua_api INTERFACE)
+target_include_directories(gateway_opcua_api INTERFACE include)
+target_link_libraries(gateway_opcua_api INTERFACE gateway_domain)
+
 add_executable(gateway src/main.cpp)
 target_include_directories(gateway PRIVATE include)
 target_link_libraries(gateway PRIVATE spdlog::spdlog)
