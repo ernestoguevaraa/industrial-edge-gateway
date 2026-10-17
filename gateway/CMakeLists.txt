@@ -20,6 +20,11 @@ target_include_directories(gateway_opcua_open62541 PRIVATE src)
 target_link_libraries(gateway_opcua_open62541 PUBLIC gateway_opcua_api PRIVATE open62541 spdlog::spdlog)
 gateway_set_warnings(gateway_opcua_open62541)
 
+# Protocol-neutral output publisher abstraction (header-only; no MQTT dependency).
+add_library(gateway_output_api INTERFACE)
+target_include_directories(gateway_output_api INTERFACE include)
+target_link_libraries(gateway_output_api INTERFACE gateway_domain)
+
 # Gateway core (header-only for now; the runtime in Issue #10 adds sources).
 add_library(gateway_core INTERFACE)
 target_include_directories(gateway_core INTERFACE include)

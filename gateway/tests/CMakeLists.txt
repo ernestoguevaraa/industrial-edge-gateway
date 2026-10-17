@@ -10,7 +10,9 @@ add_executable(
   opcua/open62541_client_test.cpp
   opcua/opcua_client_mock_test.cpp
   opcua/status_code_test.cpp
-  opcua/ua_conversion_test.cpp)
+  opcua/ua_conversion_test.cpp
+  output/publish_result_test.cpp
+  output/telemetry_publisher_mock_test.cpp)
 # The adapter's private headers (gateway/src) are visible to its unit tests only.
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/gateway/src)
 target_link_libraries(
@@ -20,6 +22,7 @@ target_link_libraries(
           gateway_domain
           gateway_opcua_api
           gateway_opcua_open62541
+          gateway_output_api
           open62541
           GTest::gmock
           GTest::gtest_main)
