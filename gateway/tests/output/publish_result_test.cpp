@@ -11,6 +11,7 @@ TEST(PublishResult, DefaultDispositionsPerStatus)
 {
     EXPECT_EQ(PublishResult::of(PublishStatus::Delivered).retry, RetryDisposition::NotApplicable);
     EXPECT_EQ(PublishResult::of(PublishStatus::NotConnected).retry, RetryDisposition::Retryable);
+    EXPECT_EQ(PublishResult::of(PublishStatus::Unavailable).retry, RetryDisposition::Retryable);
     EXPECT_EQ(PublishResult::of(PublishStatus::Timeout).retry, RetryDisposition::Retryable);
     EXPECT_EQ(PublishResult::of(PublishStatus::Stopped).retry, RetryDisposition::Retryable);
     EXPECT_EQ(PublishResult::of(PublishStatus::InvalidPoint).retry, RetryDisposition::Permanent);
@@ -45,6 +46,11 @@ TEST(PublishResult, DeliveredAndRetryableAreIndependent)
     EXPECT_TRUE(timeout.retryable());
     EXPECT_EQ(timeout.detail, "no PUBACK");
 
+    const auto unavailable = PublishResult::of(PublishStatus::Unavailable, "too many in flight");
+    EXPECT_FALSE(unavailable.delivered());
+    EXPECT_TRUE(unavailable.retryable());
+    EXPECT_EQ(unavailable.detail, "too many in flight");
+
     const auto invalid = PublishResult::of(PublishStatus::InvalidPoint);
     EXPECT_FALSE(invalid.delivered());
     EXPECT_FALSE(invalid.retryable());
@@ -54,6 +60,7 @@ TEST(PublishResult, ToStringNamesEveryValue)
 {
     EXPECT_EQ(to_string(PublishStatus::Delivered), "Delivered");
     EXPECT_EQ(to_string(PublishStatus::NotConnected), "NotConnected");
+    EXPECT_EQ(to_string(PublishStatus::Unavailable), "Unavailable");
     EXPECT_EQ(to_string(PublishStatus::Timeout), "Timeout");
     EXPECT_EQ(to_string(PublishStatus::Rejected), "Rejected");
     EXPECT_EQ(to_string(PublishStatus::InvalidPoint), "InvalidPoint");

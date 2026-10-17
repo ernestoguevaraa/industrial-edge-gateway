@@ -1,6 +1,6 @@
 #include "ieg/opcua/open62541_client.hpp"
 
-#include "opcua/backoff.hpp"
+#include "common/backoff.hpp"
 #include "opcua/ua_conversion.hpp"
 
 #include <open62541.h>
@@ -419,8 +419,8 @@ private:
 
     [[nodiscard]] std::chrono::milliseconds next_delay() const noexcept
     {
-        return detail::backoff_delay(failures_, options_.reconnect_initial_delay,
-                                     options_.reconnect_max_delay);
+        return ieg::detail::backoff_delay(failures_, options_.reconnect_initial_delay,
+                                          options_.reconnect_max_delay);
     }
 
     void wait_backoff(const std::stop_token& stop)

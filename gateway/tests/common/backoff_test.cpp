@@ -1,11 +1,11 @@
-#include "opcua/backoff.hpp"
+#include "common/backoff.hpp"
 
 #include <gtest/gtest.h>
 
 #include <chrono>
 #include <limits>
 
-namespace ieg::opcua::detail {
+namespace ieg::detail {
 namespace {
 
 using namespace std::chrono_literals;
@@ -34,4 +34,4 @@ TEST(Backoff, InitialNotBelowMaximumReturnsMaximum)
 static_assert(backoff_delay(3, 1ms, 1000ms) == 8ms);
 
 } // namespace
-} // namespace ieg::opcua::detail
+} // namespace ieg::detail

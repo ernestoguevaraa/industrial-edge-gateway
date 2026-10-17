@@ -77,6 +77,25 @@ target_link_libraries(open62541 PUBLIC ${MBEDTLS_LIBRARY} ${MBEDX509_LIBRARY} ${
                                        Threads::Threads)
 set_target_properties(open62541 PROPERTIES C_STANDARD 99 C_EXTENSIONS ON)
 
+# Eclipse Paho MQTT C (MQTTAsync API), built static without TLS for MVP 1.
+FetchContent_Declare(
+  paho_mqtt_c
+  URL https://github.com/eclipse-paho/paho.mqtt.c/archive/refs/tags/v1.3.16.tar.gz
+  URL_HASH SHA256=8b960f51edc7e03507637d987882bc486d8f4be6e79431bf99e2763344fd14c5
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  SYSTEM)
+set(PAHO_WITH_SSL OFF CACHE BOOL "" FORCE)
+set(PAHO_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(PAHO_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(PAHO_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(PAHO_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+set(PAHO_BUILD_DOCUMENTATION OFF CACHE BOOL "" FORCE)
+set(PAHO_ENABLE_CPACK OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(paho_mqtt_c)
+if(NOT TARGET eclipse-paho-mqtt-c::paho-mqtt3a-static)
+  message(FATAL_ERROR "Paho MQTT C did not provide the static async target paho-mqtt3a-static")
+endif()
+
 if(GATEWAY_BUILD_TESTS)
   FetchContent_Declare(
     googletest

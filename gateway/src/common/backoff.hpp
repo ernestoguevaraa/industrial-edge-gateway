@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-namespace ieg::opcua::detail {
+namespace ieg::detail {
 
 // Reconnect delay after `failures` consecutive failures: min(initial * 2^failures, max).
 // Saturates instead of overflowing for any number of failures.
@@ -23,4 +23,4 @@ backoff_delay(unsigned failures, std::chrono::milliseconds initial,
     return delay;
 }
 
-} // namespace ieg::opcua::detail
+} // namespace ieg::detail

@@ -18,11 +18,17 @@ enum class PublishStatus : std::uint8_t
 {
     // Accepted per the configured delivery guarantee (for MQTT QoS 1: PUBACK received).
     Delivered,
-    // No connection right now. Returned immediately without waiting for a reconnect; nothing
-    // was sent. In MVP 1 the caller has no outage buffering, so this point may be lost.
+    // There is no usable connection; the point was definitely not submitted. Returned
+    // immediately without waiting for a reconnect. Retryable. In MVP 1 the caller has no outage
+    // buffering, so this point may be lost.
     NotConnected,
-    // Sent, but not acknowledged within the publish timeout. Delivery is UNKNOWN: retrying
-    // gives at-least-once delivery (possible duplicates).
+    // The publisher is running and may still be connected, but a transient local/runtime
+    // condition (e.g. too many messages in flight) prevented submission; the point was
+    // definitely not submitted. Retryable.
+    Unavailable,
+    // Submitted, but the delivery acknowledgement is unknown (none within the publish timeout,
+    // or the connection was lost first). Retryable; retrying gives at-least-once delivery
+    // (possible duplicates).
     Timeout,
     // The receiving side refused this publication. Whether a retry can help depends on the
     // concrete reason, so the publisher decides the RetryDisposition.
@@ -50,6 +56,8 @@ enum class RetryDisposition : std::uint8_t
         return "Delivered";
     case PublishStatus::NotConnected:
         return "NotConnected";
+    case PublishStatus::Unavailable:
+        return "Unavailable";
     case PublishStatus::Timeout:
         return "Timeout";
     case PublishStatus::Rejected:
@@ -78,7 +86,7 @@ enum class RetryDisposition : std::uint8_t
 // Outcome of one publish() call. Status and retry disposition are deliberately separate: the
 // disposition for Rejected depends on the concrete publisher and the actual rejection reason.
 // Use the factories so status and disposition stay consistent:
-//   Delivered -> NotApplicable, NotConnected/Timeout/Stopped -> Retryable,
+//   Delivered -> NotApplicable, NotConnected/Unavailable/Timeout/Stopped -> Retryable,
 //   InvalidPoint -> Permanent, Rejected -> chosen by the publisher (Retryable or Permanent).
 struct PublishResult
 {
@@ -100,6 +108,7 @@ struct PublishResult
             retry = RetryDisposition::NotApplicable;
             break;
         case PublishStatus::NotConnected:
+        case PublishStatus::Unavailable:
         case PublishStatus::Timeout:
         case PublishStatus::Stopped:
             retry = RetryDisposition::Retryable;

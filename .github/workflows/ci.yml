@@ -30,7 +30,10 @@ jobs:
 
       - name: Install build dependencies
         # libmbedtls-dev: required by the official open62541 amalgamation (see cmake/Dependencies.cmake).
-        run: sudo apt-get update && sudo apt-get install -y ninja-build libmbedtls-dev
+        # mosquitto: broker binary for the MQTT publisher integration tests.
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build libmbedtls-dev mosquitto
+          echo "IEG_MOSQUITTO=/usr/sbin/mosquitto" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
         with:
