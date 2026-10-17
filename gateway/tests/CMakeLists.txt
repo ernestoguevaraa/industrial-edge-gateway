@@ -3,6 +3,7 @@ include(GoogleTest)
 add_executable(
   gateway_tests
   config/config_loader_test.cpp
+  core/bounded_queue_test.cpp
   domain/data_quality_test.cpp
   domain/telemetry_json_test.cpp
   opcua/backoff_test.cpp
@@ -15,6 +16,7 @@ target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${P
 target_link_libraries(
   gateway_tests
   PRIVATE gateway_config
+          gateway_core
           gateway_domain
           gateway_opcua_api
           gateway_opcua_open62541
