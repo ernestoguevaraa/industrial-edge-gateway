@@ -46,6 +46,12 @@ _UNECE_UNITS_URI = "http://www.opcfoundation.org/UA/units/un/cefact"
 _UNECE_CODES = {"bar": "BAR", "s": "SEC", "degC": "CEL", "units": "C62"}
 
 
+# Upper bound for asyncua's Server.stop(). asyncua 1.1.8 on Python 3.12 can wait forever in
+# asyncio's Server.wait_closed() for a client that reconnects while the server is stopping.
+# 3 s is well above a normal stop (~1 s) and below docker stop's default 10 s grace period.
+GRACEFUL_SHUTDOWN_TIMEOUT_S = 3.0
+
+
 class NamespaceIndexError(RuntimeError):
     pass
 
@@ -144,9 +150,22 @@ class PlantServer:
             },
         )
 
-    async def stop(self) -> None:
-        await self._server.stop()
+    async def stop(self, timeout_s: float = GRACEFUL_SHUTDOWN_TIMEOUT_S) -> bool:
+        """Stop the OPC UA server gracefully, bounded by ``timeout_s``.
+
+        Returns False if graceful shutdown timed out; the caller then exits anyway. Only the
+        timeout is handled here: any other error from asyncua propagates.
+        """
+        try:
+            await asyncio.wait_for(self._server.stop(), timeout=timeout_s)
+        except TimeoutError:
+            log.error(
+                "graceful OPC UA shutdown timed out; terminating without it",
+                extra={"event": "shutdown_timeout", "timeout_s": timeout_s},
+            )
+            return False
         log.info("OPC UA server stopped", extra={"event": "server_stopped"})
+        return True
 
     async def _build_address_space(self, ns: int) -> None:
         objects = self._server.nodes.objects

@@ -113,6 +113,21 @@ are deliberately not part of this guarantee. Tick scheduling jitter does not aff
 `dt` is fixed. If a tick runs over its period, the simulator logs a `tick_overrun` warning and
 resynchronises instead of catching up.
 
+## Shutdown
+
+SIGINT and SIGTERM (including `docker stop`) use the same shutdown path. The simulator first
+attempts a graceful OPC UA shutdown, which normally takes about 1 s. That attempt is bounded by
+`GRACEFUL_SHUTDOWN_TIMEOUT_S` (3 s) in `src/plant_simulator/server.py`.
+
+The bound exists because asyncua 1.1.8 on Python 3.12 can wait forever while stopping if a client
+reconnects during shutdown. asyncua closes the existing client connections, then waits until every
+connection is closed, including one that a reconnecting client opened in the meantime. If graceful
+shutdown times out, the simulator logs an `ERROR` with event `shutdown_timeout` and exits anyway.
+
+Both outcomes exit with code 0, because the process is answering a termination request rather
+than crashing. Other unexpected errors during shutdown are not suppressed. The 3 s bound is well
+below `docker stop`'s default 10 s grace period, so Docker does not need to SIGKILL the container.
+
 ## Docker healthcheck
 
 The image's `HEALTHCHECK` opens a plain TCP connection to the port. It is a basic process/listener
@@ -140,4 +155,7 @@ One JSON object per line on stdout, with the fields `timestamp`, `level`, `compo
 - `test_server.py`: runs a real server on a free port with an asyncua client. Checks namespace
   index 2, browse paths, data types, status codes, Source/Server timestamps, read-only access,
   write-on-change, and failure on an unexpected namespace index.
+- `test_shutdown.py`: bounded shutdown. A reconnect is injected exactly inside asyncua's shutdown
+  window, so the timeout path is tested deterministically. Unexpected errors are not swallowed, and
+  real SIGTERM/SIGINT exits return code 0 within the bound during a reconnect storm.
 - `test_signals.py`, `test_settings.py`: primitives and configuration.
