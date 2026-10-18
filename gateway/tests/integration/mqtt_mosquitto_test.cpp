@@ -9,8 +9,11 @@
 #include "mqtt/status_recorder.hpp"
 
 #include <gtest/gtest.h>
+#include <pthread.h>
+#include <sched.h>
 
 #include <chrono>
+#include <cstddef>
 #include <future>
 #include <memory>
 #include <string>
@@ -279,6 +282,80 @@ TEST_F(MosquittoIntegration, StopInterruptsBlockedPublishPromptlyAndSilently)
     stopping.get();
     broker().resume();
     EXPECT_TRUE(silent_after_stop(recorder));
+}
+
+// Confines the calling thread, and every thread it creates afterwards, to one CPU for its
+// lifetime. On one CPU the publish() thread and the publisher's worker compete for the core,
+// which reliably exposes ordering races between them.
+class SingleCpuScope
+{
+public:
+    SingleCpuScope() : pinned_(pin_to_one_cpu(original_)) {}
+    ~SingleCpuScope()
+    {
+        if (pinned_) {
+            ::pthread_setaffinity_np(::pthread_self(), sizeof(original_), &original_);
+        }
+    }
+    SingleCpuScope(const SingleCpuScope&) = delete;
+    SingleCpuScope& operator=(const SingleCpuScope&) = delete;
+    SingleCpuScope(SingleCpuScope&&) = delete;
+    SingleCpuScope& operator=(SingleCpuScope&&) = delete;
+
+private:
+    // Saves the current affinity in `original` and restricts the thread to its first CPU.
+    static bool pin_to_one_cpu(cpu_set_t& original)
+    {
+        CPU_ZERO(&original);
+        if (::pthread_getaffinity_np(::pthread_self(), sizeof(original), &original) != 0) {
+            return false;
+        }
+        cpu_set_t one{};
+        CPU_ZERO(&one);
+        for (std::size_t cpu = 0; cpu < static_cast<std::size_t>(CPU_SETSIZE); ++cpu) {
+            if (CPU_ISSET(cpu, &original)) {
+                CPU_SET(cpu, &one);
+                break;
+            }
+        }
+        return ::pthread_setaffinity_np(::pthread_self(), sizeof(one), &one) == 0;
+    }
+
+    cpu_set_t original_{}; // declared before pinned_: initialized first
+    bool pinned_{false};
+};
+
+// Regression: stop() interrupting an unresolved publish must yield Stopped, even when Paho's
+// discard of the pending publication (failure callback "Operation discarded before completion",
+// caused by the shutdown's DISCONNECT) is recorded before publish() observes the stop.
+TEST_F(MosquittoIntegration, StopDuringBlockedPublishIsStoppedEvenWhenShutdownDiscardWinsTheRace)
+{
+    constexpr int kIterations = 60;
+    // Keeps Paho's shared threads alive, so stopping each publisher is fast.
+    MqttTestSubscriber keep_paho_running{uri(), "ieg-integration-keepalive"};
+    keep_paho_running.subscribe("unrelated/#");
+    const SingleCpuScope single_cpu;
+
+    std::size_t stopped = 0;
+    for (int iteration = 0; iteration < kIterations; ++iteration) {
+        StatusRecorder recorder;
+        auto opts = options();
+        opts.publish_timeout = 30s;
+        MqttPublisher publisher{opts};
+        ASSERT_TRUE(start_connected(publisher, recorder)) << "iteration " << iteration;
+
+        broker().pause();
+        auto blocked = start_blocked_publish(publisher);
+        publisher.stop();
+        broker().resume();
+        ASSERT_EQ(blocked.wait_for(5s), std::future_status::ready) << "iteration " << iteration;
+        const auto result = blocked.get();
+        EXPECT_EQ(result.status, PublishStatus::Stopped)
+            << "iteration " << iteration << ": " << output::to_string(result.status) << " ("
+            << result.detail << ")";
+        stopped += result.status == PublishStatus::Stopped ? 1U : 0U;
+    }
+    EXPECT_EQ(stopped, static_cast<std::size_t>(kIterations));
 }
 
 TEST_F(MosquittoIntegration, ConnectionLossDuringPublishIsTimeoutWithUnknownOutcome)

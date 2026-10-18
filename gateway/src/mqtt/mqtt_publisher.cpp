@@ -176,22 +176,23 @@ void on_publish_success(void* context, MQTTAsync_successData5* /*response*/)
 void on_publish_failure(void* context, MQTTAsync_failureData5* response)
 {
     try {
-        PublishResult result;
         if (response != nullptr && response->packet_type == kPubackPacketType) {
+            // A broker decision: recorded as given, never rewritten by a later shutdown.
             auto mapping = detail::map_puback_reason(static_cast<int>(response->reasonCode),
                                                      reason_string(response->properties));
             if (mapping.unexpected) {
                 logger().warn("event=unexpected_puback_reason detail=\"{}\"",
                               mapping.result.detail);
             }
-            result = std::move(mapping.result);
+            static_cast<void>(
+                Registry::instance().complete(from_context(context), std::move(mapping.result)));
         } else {
-            result = PublishResult::of(
-                PublishStatus::Timeout,
-                "publish failed before acknowledgement; delivery outcome unknown: " +
-                    describe_failure(response));
+            // Resolved locally without a broker decision (e.g. "Operation discarded before
+            // completion" when our own shutdown disconnects). The registry turns this into
+            // Stopped if the publisher was already stopping, otherwise Timeout.
+            static_cast<void>(Registry::instance().complete_unresolved(from_context(context),
+                                                                       describe_failure(response)));
         }
-        static_cast<void>(Registry::instance().complete(from_context(context), std::move(result)));
     } catch (...) {
         report_callback_exception("on_publish_failure");
     }
@@ -287,7 +288,9 @@ public:
         const std::uint64_t epoch = epoch_.load();
 
         auto& registry = Registry::instance();
-        const Registry::Id id = registry.add();
+        // stop_requested_ is set before the shutdown disconnects or destroys the client, so a
+        // discard caused by the shutdown is always classified as Stopped.
+        const Registry::Id id = registry.add(&stop_requested_);
         MQTTAsync_message message = MQTTAsync_message_initializer;
         message.payload = payload.json.data();
         message.payloadlen = static_cast<int>(payload.json.size());

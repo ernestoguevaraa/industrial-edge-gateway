@@ -6,6 +6,7 @@
 #include <chrono>
 #include <future>
 #include <set>
+#include <string>
 #include <thread>
 
 namespace ieg::mqtt::detail {
@@ -92,6 +93,88 @@ TEST(CompletionRegistry, CompletionFromAnotherThreadWakesTheWaiter)
     ASSERT_EQ(waiter.wait_for(5s), std::future_status::ready);
     const auto result = waiter.get();
     EXPECT_TRUE(result.has_value() && result->delivered());
+}
+
+TEST(CompletionRegistry, UnresolvedBeforeShutdownIsTimeoutWithUnknownOutcome)
+{
+    // E.g. Paho discards the publication because the connection dropped on its own.
+    CompletionRegistry registry;
+    const std::atomic<bool> shutting_down{false};
+    const auto id = registry.add(&shutting_down);
+    EXPECT_TRUE(registry.complete_unresolved(id, "Operation discarded before completion"));
+    const auto result = registry.wait_and_remove(id, Clock::now() + 1s, [] { return false; });
+    EXPECT_TRUE(result.has_value() && result->status == PublishStatus::Timeout &&
+                result->retryable() &&
+                result->detail.find("delivery outcome unknown") != std::string::npos);
+}
+
+TEST(CompletionRegistry, UnresolvedAfterShutdownStartedIsStopped)
+{
+    // Paho discards the publication because our own shutdown disconnected the client.
+    CompletionRegistry registry;
+    std::atomic<bool> shutting_down{false};
+    const auto id = registry.add(&shutting_down);
+    shutting_down.store(true);
+    EXPECT_TRUE(registry.complete_unresolved(id, "Operation discarded before completion"));
+    const auto result = registry.wait_and_remove(id, Clock::now() + 1s, [] { return false; });
+    EXPECT_TRUE(result.has_value() && result->status == PublishStatus::Stopped &&
+                result->retryable());
+}
+
+TEST(CompletionRegistry, UnresolvedWithoutAStopFlagIsTimeout)
+{
+    CompletionRegistry registry;
+    const auto id = registry.add();
+    EXPECT_TRUE(registry.complete_unresolved(id, "reason"));
+    const auto result = registry.wait_and_remove(id, Clock::now() + 1s, [] { return false; });
+    EXPECT_TRUE(result.has_value() && result->status == PublishStatus::Timeout);
+}
+
+TEST(CompletionRegistry, BrokerOutcomeRecordedBeforeShutdownIsNeverRewritten)
+{
+    CompletionRegistry registry;
+    std::atomic<bool> shutting_down{false};
+    const auto id = registry.add(&shutting_down);
+    EXPECT_TRUE(registry.complete(id, PublishResult::of(PublishStatus::Delivered)));
+    shutting_down.store(true);
+    EXPECT_FALSE(registry.complete_unresolved(id, "Operation discarded before completion"));
+    const auto result = registry.wait_and_remove(id, Clock::now() + 1s, [] { return false; });
+    EXPECT_TRUE(result.has_value() && result->delivered());
+}
+
+// Models the shutdown race: the stopper sets the flag and wakes waiters while a discard caused
+// by that shutdown is recorded concurrently, possibly before the waiter re-checks. The waiter
+// must never see Timeout: it gets either Stopped (discard recorded first) or no outcome while
+// stop is requested (which publish() reports as Stopped).
+TEST(CompletionRegistry, ShutdownDiscardRaceNeverYieldsTimeout)
+{
+    constexpr int kIterations = 2000;
+    int timeouts = 0;
+    for (int i = 0; i < kIterations; ++i) {
+        CompletionRegistry registry;
+        std::atomic<bool> shutting_down{false};
+        const auto id = registry.add(&shutting_down);
+        auto waiter = std::async(std::launch::async, [&] {
+            return registry.wait_and_remove(id, Clock::now() + 10s,
+                                            [&] { return shutting_down.load(); });
+        });
+        auto discarder = std::async(std::launch::async, [&] {
+            while (!shutting_down.load()) {
+                std::this_thread::yield(); // the discard is a consequence of the shutdown
+            }
+            static_cast<void>(
+                registry.complete_unresolved(id, "Operation discarded before completion"));
+        });
+        shutting_down.store(true);
+        registry.wake_all();
+        discarder.get();
+        ASSERT_EQ(waiter.wait_for(5s), std::future_status::ready);
+        const auto result = waiter.get();
+        if (result && result->status != PublishStatus::Stopped) {
+            ++timeouts;
+        }
+    }
+    EXPECT_EQ(timeouts, 0);
 }
 
 } // namespace
