@@ -7,6 +7,9 @@ mqtt:
   port: 1883
   qos: 1
   topic_prefix: "industrial"
+  # Stable gateway identity towards the broker. If omitted, a development fallback
+  # ("ieg-gateway-<hostname>") is used, which changes when the container is recreated.
+  client_id: "ieg-gateway-01"
 
 assets:
   - asset: "site01.line01.press01"

@@ -17,7 +17,9 @@ add_executable(
   mqtt/topic_test.cpp
   opcua/ua_conversion_test.cpp
   output/publish_result_test.cpp
-  output/telemetry_publisher_mock_test.cpp)
+  output/telemetry_publisher_mock_test.cpp
+  runtime/gateway_runtime_test.cpp
+  runtime/telemetry_mapping_test.cpp)
 # The adapter's private headers (gateway/src) are visible to its unit tests only.
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/gateway/src)
 target_link_libraries(
@@ -29,6 +31,7 @@ target_link_libraries(
           gateway_opcua_api
           gateway_opcua_open62541
           gateway_output_api
+          gateway_runtime
           eclipse-paho-mqtt-c::paho-mqtt3a-static
           open62541
           GTest::gmock
@@ -42,11 +45,16 @@ gtest_discover_tests(gateway_tests)
 # Real adapters against real external processes, each skipped unless its variable is set:
 #  - IEG_SIMULATOR_PYTHON: interpreter with simulator/requirements.txt (OPC UA simulator)
 #  - IEG_MOSQUITTO: mosquitto broker binary (MQTT publisher)
-add_executable(gateway_integration_tests integration/mqtt_mosquitto_test.cpp integration/open62541_simulator_test.cpp)
+#  - both: end-to-end test of the gateway executable
+add_executable(gateway_integration_tests integration/gateway_end_to_end_test.cpp integration/mqtt_mosquitto_test.cpp
+                                         integration/open62541_simulator_test.cpp)
 target_include_directories(gateway_integration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gateway_integration_tests PRIVATE gateway_domain gateway_mqtt gateway_opcua_open62541
                                                         eclipse-paho-mqtt-c::paho-mqtt3a-static GTest::gtest_main)
-target_compile_definitions(gateway_integration_tests PRIVATE IEG_SIMULATOR_DIR="${PROJECT_SOURCE_DIR}/simulator")
+target_compile_definitions(gateway_integration_tests PRIVATE IEG_SIMULATOR_DIR="${PROJECT_SOURCE_DIR}/simulator"
+                                                             IEG_GATEWAY_BINARY="$<TARGET_FILE:gateway>")
+# The end-to-end test runs the real gateway executable.
+add_dependencies(gateway_integration_tests gateway)
 gateway_set_warnings(gateway_integration_tests)
 
 gtest_discover_tests(gateway_integration_tests PROPERTIES LABELS integration DISCOVERY_TIMEOUT 30)

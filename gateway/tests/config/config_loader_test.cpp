@@ -17,6 +17,7 @@ using ::testing::AllOf;
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 using ::testing::SizeIs;
+using ::testing::UnorderedElementsAre;
 
 constexpr std::string_view kSingleAsset = R"(assets:
   - asset: site01.line01.press01
@@ -87,6 +88,9 @@ TEST(ConfigLoader, LoadsRepositoryExampleFile)
     EXPECT_EQ(config.mqtt.port, 1883);
     EXPECT_EQ(config.mqtt.qos, MqttQos::AtLeastOnce);
     EXPECT_EQ(config.mqtt.topic_prefix, "industrial");
+    EXPECT_EQ(config.mqtt.client_id, "ieg-gateway-01");
+    EXPECT_EQ(config.runtime.queue_capacity, 10'000U);
+    EXPECT_EQ(config.runtime.shutdown_drain_timeout, std::chrono::milliseconds{3000});
 
     ASSERT_THAT(config.assets, SizeIs(2));
     EXPECT_EQ(config.assets[0].asset, "site01.line01.press01");
@@ -128,6 +132,57 @@ TEST(ConfigLoader, AcceptsAllMqttQosLevels)
         yaml.qos = text;
         EXPECT_EQ(parse_config(yaml.str()).mqtt.qos, expected) << "qos " << text;
     }
+}
+
+TEST(ConfigLoader, OptionalKeysDefaultWhenAbsent)
+{
+    const auto config = parse_config(TestYaml{}.str());
+    EXPECT_EQ(config.mqtt.client_id, "");
+    EXPECT_EQ(config.runtime.queue_capacity, 10'000U);
+    EXPECT_EQ(config.runtime.shutdown_drain_timeout, std::chrono::milliseconds{3000});
+}
+
+TEST(ConfigLoader, ParsesClientIdAndRuntimeSection)
+{
+    TestYaml yaml;
+    yaml.topic_prefix = "industrial\n  client_id: gw-7";
+    yaml.assets = "runtime:\n  queue_capacity: 250\n  shutdown_drain_timeout_ms: 1500\n" +
+                  std::string{kSingleAsset};
+    const auto config = parse_config(yaml.str());
+    EXPECT_EQ(config.mqtt.client_id, "gw-7");
+    EXPECT_EQ(config.runtime.queue_capacity, 250U);
+    EXPECT_EQ(config.runtime.shutdown_drain_timeout, std::chrono::milliseconds{1500});
+}
+
+TEST(ConfigLoader, RuntimeSectionKeysAreIndividuallyOptional)
+{
+    TestYaml yaml;
+    yaml.assets = "runtime:\n  queue_capacity: 5\n" + std::string{kSingleAsset};
+    const auto config = parse_config(yaml.str());
+    EXPECT_EQ(config.runtime.queue_capacity, 5U);
+    EXPECT_EQ(config.runtime.shutdown_drain_timeout, std::chrono::milliseconds{3000});
+}
+
+TEST(ConfigLoader, RejectsInvalidClientId)
+{
+    for (const std::string value : {R"("")", R"("gw 1")"}) {
+        TestYaml yaml;
+        yaml.topic_prefix = "industrial\n  client_id: " + value;
+        EXPECT_THAT(errors_for(yaml.str()), ElementsAre(HasSubstr("mqtt.client_id"))) << value;
+    }
+}
+
+TEST(ConfigLoader, RejectsRuntimeValuesOutOfRangeAndUnknownKeys)
+{
+    TestYaml yaml;
+    yaml.assets = "runtime:\n  queue_capacity: 0\n  shutdown_drain_timeout_ms: 99\n"
+                  "  queue_size: 3\n" +
+                  std::string{kSingleAsset};
+    EXPECT_THAT(
+        errors_for(yaml.str()),
+        UnorderedElementsAre(HasSubstr("runtime: unknown key 'queue_size'"),
+                             HasSubstr("runtime.queue_capacity: invalid value 0"),
+                             HasSubstr("runtime.shutdown_drain_timeout_ms: invalid value 99")));
 }
 
 TEST(ConfigLoader, AcceptsDeeperAssetHierarchies)
@@ -217,7 +272,7 @@ TEST(ConfigLoader, RejectsUnknownKey)
     yaml.topic_prefix = "industrial\n  qso: 1";
     EXPECT_THAT(errors_for(yaml.str()),
                 ElementsAre("<memory>:9:3: mqtt: unknown key 'qso'; expected one of: host, port, "
-                            "qos, topic_prefix"));
+                            "qos, topic_prefix, client_id"));
 }
 
 TEST(ConfigLoader, RejectsDuplicateYamlKey)

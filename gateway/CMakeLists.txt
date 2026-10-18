@@ -34,14 +34,24 @@ target_link_libraries(gateway_mqtt PUBLIC gateway_output_api PRIVATE eclipse-pah
                                                                      spdlog::spdlog)
 gateway_set_warnings(gateway_mqtt)
 
-# Gateway core (header-only for now; the runtime in Issue #10 adds sources).
+# Gateway core primitives (header-only).
 add_library(gateway_core INTERFACE)
 target_include_directories(gateway_core INTERFACE include)
 target_link_libraries(gateway_core INTERFACE gateway_domain)
 
+# Gateway runtime: wires configuration, the OPC UA adapter, the queue and the MQTT publisher.
+add_library(gateway_runtime STATIC src/runtime/gateway_runtime.cpp src/runtime/runtime_factory.cpp
+                                   src/runtime/telemetry_mapping.cpp)
+target_include_directories(gateway_runtime PRIVATE src)
+target_link_libraries(
+  gateway_runtime
+  PUBLIC gateway_config gateway_core gateway_opcua_api gateway_output_api
+  PRIVATE gateway_mqtt gateway_opcua_open62541 spdlog::spdlog)
+gateway_set_warnings(gateway_runtime)
+
 add_executable(gateway src/main.cpp)
 target_include_directories(gateway PRIVATE include)
-target_link_libraries(gateway PRIVATE spdlog::spdlog)
+target_link_libraries(gateway PRIVATE gateway_config gateway_runtime spdlog::spdlog)
 gateway_set_warnings(gateway)
 
 if(GATEWAY_BUILD_TESTS)

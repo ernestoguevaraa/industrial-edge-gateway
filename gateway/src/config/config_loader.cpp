@@ -236,9 +236,10 @@ private:
 
     std::optional<std::int64_t> read_integer(const YAML::Node& map, std::string_view key,
                                              std::string_view path, std::int64_t min,
-                                             std::int64_t max, std::string_view expected)
+                                             std::int64_t max, std::string_view expected,
+                                             bool required = true)
     {
-        const auto node = field(map, key, path, true);
+        const auto node = field(map, key, path, required);
         if (!node) {
             return std::nullopt;
         }
@@ -295,13 +296,16 @@ private:
         if (!expect_map(root, "")) {
             return config;
         }
-        check_keys(root, "", {"opcua", "mqtt", "assets"});
+        check_keys(root, "", {"opcua", "mqtt", "runtime", "assets"});
 
         if (const auto opcua = field(root, "opcua", "", true)) {
             config.opcua = parse_opcua(*opcua);
         }
         if (const auto mqtt = field(root, "mqtt", "", true)) {
             config.mqtt = parse_mqtt(*mqtt);
+        }
+        if (const auto runtime = field(root, "runtime", "", false)) {
+            config.runtime = parse_runtime(*runtime);
         }
         if (const auto assets = field(root, "assets", "", true)) {
             config.assets = parse_assets(*assets);
@@ -341,7 +345,7 @@ private:
         if (!expect_map(node, path)) {
             return mqtt;
         }
-        check_keys(node, path, {"host", "port", "qos", "topic_prefix"});
+        check_keys(node, path, {"host", "port", "qos", "topic_prefix", "client_id"});
 
         if (const auto host = read_string(node, "host", path)) {
             if (host->value.empty()) {
@@ -366,7 +370,36 @@ private:
             }
             mqtt.topic_prefix = prefix->value;
         }
+        if (const auto client_id = read_string(node, "client_id", path, false)) {
+            if (client_id->value.empty()) {
+                add_error(client_id->mark, "mqtt.client_id", "must not be empty when present");
+            } else if (contains_whitespace(client_id->value)) {
+                add_error(client_id->mark, "mqtt.client_id",
+                          std::format("'{}' must not contain whitespace", client_id->value));
+            }
+            mqtt.client_id = client_id->value;
+        }
         return mqtt;
+    }
+
+    RuntimeConfig parse_runtime(const YAML::Node& node)
+    {
+        constexpr std::string_view path = "runtime";
+        RuntimeConfig runtime;
+        if (!expect_map(node, path)) {
+            return runtime;
+        }
+        check_keys(node, path, {"queue_capacity", "shutdown_drain_timeout_ms"});
+
+        if (const auto capacity = read_integer(node, "queue_capacity", path, 1, 1'000'000,
+                                               "an integer between 1 and 1000000", false)) {
+            runtime.queue_capacity = static_cast<std::size_t>(*capacity);
+        }
+        if (const auto drain = read_integer(node, "shutdown_drain_timeout_ms", path, 100, 60'000,
+                                            "an integer between 100 and 60000", false)) {
+            runtime.shutdown_drain_timeout = std::chrono::milliseconds{*drain};
+        }
+        return runtime;
     }
 
     std::vector<AssetConfig> parse_assets(const YAML::Node& node)

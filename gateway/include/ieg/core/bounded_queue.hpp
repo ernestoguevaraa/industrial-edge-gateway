@@ -42,6 +42,8 @@ struct QueueStats
 //
 // This is NOT store-and-forward and NOT an outage-delivery guarantee: items live only in memory,
 // and when the queue is full the oldest item is dropped (drop-oldest is the only policy).
+// Whether it also bridges short consumer-side outages is the owner's consumer policy (see
+// TelemetryQueue).
 //
 // Storage is a ring buffer preallocated to `capacity` slots; the queue never grows beyond it.
 // Thread-safe for any number of producers and consumers, using one mutex and one condition

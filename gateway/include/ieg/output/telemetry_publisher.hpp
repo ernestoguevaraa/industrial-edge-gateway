@@ -19,8 +19,8 @@ enum class PublishStatus : std::uint8_t
     // Accepted per the configured delivery guarantee (for MQTT QoS 1: PUBACK received).
     Delivered,
     // There is no usable connection; the point was definitely not submitted. Returned
-    // immediately without waiting for a reconnect. Retryable. In MVP 1 the caller has no outage
-    // buffering, so this point may be lost.
+    // immediately without waiting for a reconnect. Retryable. MVP 1 does not retry, so the point
+    // passed to this call is lost (the gateway runtime avoids popping points while disconnected).
     NotConnected,
     // The publisher is running and may still be connected, but a transient local/runtime
     // condition (e.g. too many messages in flight) prevented submission; the point was
