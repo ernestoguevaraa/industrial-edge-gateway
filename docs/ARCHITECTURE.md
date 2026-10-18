@@ -11,20 +11,22 @@ Python OPC UA Simulator
         v
 Open62541Client
         |
-        | TelemetryPoint
+        | DataChange (protocol-neutral)
         v
-Gateway Core
+Gateway Runtime  (mapping, edge timestamp, bounded queue)
         |
         | TelemetryPoint
         v
-MQTT Publisher
+MqttPublisher
         |
         | MQTT 5 / JSON
         v
 Mosquitto
 ```
 
-The architecture deliberately separates protocol-specific code from the internal telemetry model.
+The architecture deliberately separates protocol-specific code from the internal telemetry model:
+the runtime depends only on the `IOpcUaClient` and `ITelemetryPublisher` interfaces, and no
+open62541 or Paho type appears in a public header.
 
 ## 2. Components
 
@@ -32,13 +34,13 @@ The architecture deliberately separates protocol-specific code from the internal
 
 Responsibilities:
 
-- Run an OPC UA server
+- Run an OPC UA server (Python, asyncua)
 - Expose a small but realistic plant model
 - Generate deterministic industrial-like data
 - Preserve state between scan intervals
 - Provide source timestamps and OPC UA quality
 
-Initial simulated assets:
+Simulated assets:
 
 ```text
 Site01
@@ -54,23 +56,29 @@ Site01
         └── ProductionCount
 ```
 
-The simulator should avoid purely random values. Temperature, pressure, state and counters should follow bounded and stateful behavior.
+Values are bounded and stateful, not random: the model advances in fixed simulated time steps,
+all randomness is seeded, and machine states follow a scripted, looping operating scenario that
+includes scripted Bad/Uncertain quality windows. A variable is written (with a new source
+timestamp) only when its value or status changes. See `simulator/README.md`.
 
 ### 2.2 OPC UA Adapter
 
-Implementation: `Open62541Client`
+Implementation: `Open62541Client` (open62541 1.4.21) behind `IOpcUaClient`.
 
 Responsibilities:
 
-- Connect/disconnect from configured OPC UA endpoint
-- Create subscriptions
-- Create monitored items
-- Convert OPC UA callbacks into protocol-neutral updates
-- Preserve source timestamp
-- Map OPC UA status/quality to internal `DataQuality`
-- Reconnect after temporary connection failure
+- Connect/disconnect from the configured OPC UA endpoint
+- Create the subscription and the monitored items
+- Convert OPC UA notifications into protocol-neutral `DataChange` updates
+- Preserve the source timestamp and the raw OPC UA StatusCode
+- Map the StatusCode severity to `DataQuality` (GOOD/UNCERTAIN/BAD)
+- Reconnect after connection failures
 
-The rest of the application must not depend directly on `open62541` types.
+One adapter-owned worker thread exclusively owns the open62541 client. Every connection attempt
+uses a fresh client, so a reconnect always recreates the session, the subscription and all
+monitored items. Reconnects use bounded exponential backoff (500 ms up to 30 s by default).
+Values that cannot be represented (arrays, unsupported types, non-finite floats) are reported as
+BAD without a value and logged.
 
 ### 2.3 Domain Model
 
@@ -83,13 +91,13 @@ struct TelemetryPoint {
     TelemetryValue value;
     std::string unit;
     DataQuality quality;
-    Timestamp source_timestamp;
+    std::optional<Timestamp> source_timestamp; // absent if the source sent none
     Timestamp edge_timestamp;
     std::string protocol;
 };
 ```
 
-`TelemetryValue` should support at least:
+`TelemetryValue` supports:
 
 - boolean
 - signed integer
@@ -107,20 +115,33 @@ BAD
 
 ### 2.4 Gateway Core
 
+Implementation: `GatewayRuntime`.
+
 Responsibilities:
 
-- Own lifecycle of configured protocol adapters
-- Receive normalized telemetry
-- Apply asset/tag metadata
-- Add edge timestamp
-- Forward telemetry to output publishers
+- Own the lifecycle of the OPC UA client and the publisher
+- Receive normalized updates
+- Apply asset/tag/unit metadata from the configuration
+- Add the edge timestamp (taken when the update is received, before it is queued)
+- Forward telemetry to the publisher
 - Log failures and state transitions
 
-MVP 1 does not introduce a persistent queue.
+The OPC UA data callback only maps, timestamps and pushes into a bounded in-memory queue; it never
+performs network I/O or logging. A single consumer thread takes points from the queue and
+publishes them. An update that carries no value is not turned into a `TelemetryPoint`; it is
+counted per item together with its most recent status code. Quality is never normalized:
+UNCERTAIN and BAD values are published as such.
 
-A bounded in-memory queue may be introduced if required by the callback/publisher threading model, but it should not be used as a substitute for the planned store-and-forward layer.
+The queue holds up to `runtime.queue_capacity` telemetry points (default 10000) and drops the
+oldest point when full. While the MQTT connection is down the consumer stops taking points, so
+the queue provides best-effort, in-memory buffering of the most recent points during short
+outages. It is not persistent store-and-forward: queued points are lost on restart and failed
+publishes are not retried in MVP 1.
 
 ### 2.5 MQTT Publisher
+
+Implementation: `MqttPublisher` (Eclipse Paho MQTT C 1.3.16, MQTTAsync API) behind
+`ITelemetryPublisher`.
 
 Responsibilities:
 
@@ -128,27 +149,28 @@ Responsibilities:
 - Serialize `TelemetryPoint` as JSON
 - Publish to deterministic topics
 - Reconnect after broker interruptions
-- Log publish failures
+- Report each publish outcome to the caller
 
-Initial topic convention:
+Topic convention:
 
 ```text
-industrial/<site>/<line>/<asset>/<tag>
+<topic_prefix>/<asset levels>/<tag>
 ```
 
-Example:
+The asset identifier is split on `.`. Example with `topic_prefix: industrial`:
 
 ```text
 industrial/site01/line01/oven01/temperature
 ```
 
-QoS for MVP 1: QoS 1.
-
-Retain: false.
+QoS 1 and retain false are fixed in MVP 1. A publish is reported as delivered only after a
+successful PUBACK; MQTT 5 PUBACK reason codes are mapped to retry dispositions (retryable or
+permanent). While disconnected, a publish returns immediately without being sent. The session
+uses clean start with session expiry 0; reconnects use bounded exponential backoff.
 
 ### 2.6 Configuration
 
-Configuration must be externalized.
+Configuration is externalized in YAML (see `configs/gateway.example.yaml`).
 
 Example:
 
@@ -161,6 +183,12 @@ mqtt:
   host: mosquitto
   port: 1883
   qos: 1
+  topic_prefix: industrial
+  client_id: ieg-gateway-01        # optional; development fallback if omitted
+
+runtime:                           # optional section
+  queue_capacity: 10000            # telemetry points
+  shutdown_drain_timeout_ms: 3000
 
 assets:
   - asset: site01.line01.press01
@@ -173,126 +201,133 @@ assets:
         unit: units
 ```
 
-Invalid configuration must cause a clear startup failure.
+Invalid configuration causes a clear startup failure listing every problem (exit code 2). The
+loader accepts MQTT QoS 0–2; the MVP 1 runtime rejects anything other than QoS 1 at startup.
 
 ## 3. Threading Model
 
-MVP 1 should remain simple.
-
-Preferred model:
+Implemented model:
 
 ```text
-open62541 event loop / callback
-        |
+OPC UA worker thread (open62541 client)
+        |  data callback: map + edge timestamp + try_push (no I/O)
         v
 bounded telemetry queue
         |
         v
-single MQTT publishing worker
+single publishing (consumer) thread  --->  MqttPublisher (Paho)
 ```
+
+Additional threads: the MQTT publisher's connection worker, Paho's internal threads, a monitor
+thread that performs all connection-transition and summary logging outside the adapter
+callbacks, and the main thread, which waits for SIGINT/SIGTERM with `sigwait`.
 
 Rationale:
 
 - Keep OPC UA callback latency low
 - Avoid MQTT network operations inside OPC UA callbacks
 - Establish an architecture that can evolve toward store-and-forward
-- Make queue depth observable later
+- Make queue depth observable (reported in the periodic summary log)
 
 No thread-per-tag design.
+
+Shutdown is bounded and ordered: stop the OPC UA client (producers) → close the queue → let the
+consumer drain until it finishes or the drain timeout passes (then the publisher is stopped to
+interrupt a blocked publish) → stop the publisher → join all threads.
 
 ## 4. Error Handling
 
 Errors are grouped into:
 
 ### Configuration errors
-Fatal at startup.
+Fatal at startup (exit code 2).
 
 Examples:
 
 - malformed YAML
 - duplicated asset/tag
-- unsupported type
+- unsupported value (e.g. MQTT QoS other than 1 in MVP 1)
 - missing OPC UA endpoint
 
 ### Connectivity errors
-Non-fatal after successful startup.
+Non-fatal at startup and afterwards.
 
 Examples:
 
 - OPC UA server unavailable
 - MQTT broker unavailable
 
-The gateway should retry with bounded/exponential backoff.
+Both adapters retry with bounded exponential backoff and report their connection state.
 
 ### Data errors
-Log and continue when possible.
+Logged and counted; processing continues.
 
 Examples:
 
-- unexpected OPC UA type
-- invalid data quality
-- serialization failure
+- unexpected OPC UA type (reported as BAD without a value)
+- invalid data quality (reserved StatusCode severity is treated as BAD)
+- serialization failure (the point is not published)
+
+Exit codes: `0` after a requested shutdown, `1` start failure, `2` configuration error.
 
 ## 5. Logging
 
-Use structured, machine-readable logging where practical.
+Logging is structured and machine-readable: each gateway line is
+`<UTC timestamp> <level> [<component>] event=<name> key=value…`, with components `gateway`,
+`runtime`, `opcua` and `mqtt` and fields such as `endpoint`/`broker`, `asset`, `tag`, `status`,
+`reason` and `error` where applicable. The simulator logs JSON lines.
 
-Minimum fields:
-
-```text
-timestamp
-level
-component
-event
-asset
-tag
-endpoint/broker where applicable
-error
-```
-
-Avoid logging every telemetry sample at INFO level.
+Individual telemetry samples are not logged at INFO level; the runtime logs connection
+transitions and a periodic summary (delivered, dropped and failed counts, queue depth).
 
 ## 6. Testing Strategy
 
 ### Unit tests
 
-- Telemetry value conversion
-- OPC UA quality mapping
-- Topic construction
-- JSON serialization
+- Telemetry value conversion and JSON serialization
+- OPC UA quality mapping and DataValue conversion
+- Topic construction and MQTT reason-code mapping
 - Configuration validation
+- Bounded queue, publisher and runtime behavior with mocks, including concurrency and shutdown
 
-### Integration test
+### Integration tests
 
-Start:
+- `Open62541Client` against the real Python simulator, including reconnect after a simulator
+  restart
+- `MqttPublisher` against a real Mosquitto broker, including broker restart, timeouts and
+  shutdown while a publish is blocked
 
-- simulator
-- Mosquitto
-- gateway
+### End-to-end tests
 
-Assert that:
+The gateway executable runs between the real simulator and a real broker. The tests assert
+that:
 
-1. Gateway connects to OPC UA.
-2. Gateway subscribes to configured nodes.
-3. MQTT message appears.
-4. Payload has required fields.
+1. The gateway connects to OPC UA.
+2. The gateway subscribes to the configured nodes.
+3. MQTT messages appear on every configured topic.
+4. Payloads have the required fields.
 5. Asset/tag values are correct.
-6. Source timestamp exists.
-7. Edge timestamp exists.
+6. Source timestamps exist.
+7. Edge timestamps exist.
 8. Quality is valid.
+
+The Compose smoke test (`scripts/compose-smoke-test.sh`) checks the same on the Docker Compose
+demo, restarts Mosquitto and the simulator to verify that the running gateway reconnects and
+resumes publishing, and verifies a clean SIGTERM shutdown.
 
 ## 7. Security
 
-MVP 1 uses local anonymous OPC UA and unauthenticated MQTT for development convenience.
+MVP 1 uses local anonymous OPC UA (security mode None) and unauthenticated MQTT for development
+convenience. The Compose demo publishes its ports on 127.0.0.1 only.
 
 This is explicitly not a production security configuration.
 
 TLS, certificates and mTLS are planned for a later milestone.
 
-## 8. Planned Evolution
+## 8. Planned Evolution (not implemented)
 
 ```text
-MVP 1  OPC UA -> MQTT
+MVP 1  OPC UA -> MQTT                      (v0.1.0, implemented)
 MVP 2  Modbus + common acquisition model
 MVP 3  SQLite store-and-forward
 MVP 4  metrics / observability

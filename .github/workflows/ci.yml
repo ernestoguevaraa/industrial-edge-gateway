@@ -88,7 +88,8 @@ jobs:
 
       - name: Run Compose demo smoke test
         # Builds the gateway and simulator images, runs the stack, checks the seven MQTT topics
-        # and payloads, and verifies a clean SIGTERM shutdown (scripts/compose-smoke-test.sh).
+        # and payloads, restarts Mosquitto and the simulator to verify that the running gateway
+        # recovers, and verifies a clean SIGTERM shutdown (scripts/compose-smoke-test.sh).
         run: scripts/compose-smoke-test.sh
 
   format:

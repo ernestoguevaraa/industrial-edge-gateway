@@ -435,21 +435,30 @@ starts, and checks that:
 - every payload parses as JSON (with the Python inside the simulator container) and contains
   the required fields with the expected asset, tag and unit;
 - the gateway logs its start and both connections;
+- after `docker compose restart mosquitto`, the same gateway process (unchanged container start)
+  reconnects and publishes fresh telemetry (edge timestamps after the restart);
+- after `docker compose restart plant-simulator`, the same gateway process reconnects, restores
+  all seven monitored items and publishes fresh telemetry (source timestamps after the restart);
 - the gateway container stops on SIGTERM with exit code 0 within the grace period.
+
+The images are built once and the same stack is used for every phase; each wait is bounded, and
+on failure the script prints the service states and recent logs.
 
 It removes its containers and network when it finishes, also on failure.
 
 ## 16. Definition of Done
 
-MVP 1 is complete only when:
+MVP 1 (v0.1.0) is complete: every criterion below is met.
 
-- `docker compose up --build` starts all services
-- OPC UA subscriptions work
-- normalized telemetry reaches MQTT
-- `mosquitto_sub` shows expected messages
-- OPC UA reconnect succeeds
-- MQTT reconnect succeeds
-- unit tests pass
-- integration test passes
-- GitHub Actions build is green
-- README and architecture documentation match actual behavior
+| Criterion | Verified by |
+|---|---|
+| `docker compose up --build` starts all services | Compose smoke test (CI job `compose-demo`), section 4 |
+| OPC UA subscriptions work | integration and end-to-end tests |
+| normalized telemetry reaches MQTT | end-to-end tests, Compose smoke test |
+| `mosquitto_sub` shows expected messages | section 5, Compose smoke test |
+| OPC UA reconnect succeeds | Compose smoke test (simulator restart), adapter integration tests, section 10 |
+| MQTT reconnect succeeds | Compose smoke test (broker restart), publisher integration tests, section 11 |
+| unit tests pass | CI `build-test` jobs |
+| integration test passes | CI `build-test` jobs |
+| GitHub Actions build is green | CI badge in `README.md` |
+| README and architecture documentation match actual behavior | `README.md`, `docs/ARCHITECTURE.md`, this runbook |

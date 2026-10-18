@@ -5,11 +5,14 @@
 # Python interpreter inside the plant-simulator container.
 #
 # Runs as its own Compose project with random loopback host ports, so it does not interfere with
-# a running demo. Verifies that:
+# a running demo. The images are built once and the same stack is used throughout. Verifies that:
 #   1. the exact set of seven configured MQTT topics arrives, every payload is valid JSON with
 #      the required fields and the expected asset/tag/unit;
 #   2. the gateway logs its start and both connections;
-#   3. the gateway container stops on SIGTERM with exit code 0 within the grace period.
+#   3. after a Mosquitto restart, the same gateway process reconnects and fresh telemetry flows;
+#   4. after a plant-simulator restart, the same gateway process reconnects, restores all
+#      monitored items and fresh telemetry flows;
+#   5. the gateway container stops on SIGTERM with exit code 0 within the grace period.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -17,6 +20,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 readonly PROJECT="${IEG_SMOKE_PROJECT:-ieg-smoke}"
 readonly TOPIC_TIMEOUT_S=90 # safety bound for the subscriber; it is stopped explicitly
 readonly STOP_GRACE_S=15
+readonly RECOVERY_TIMEOUT_S=60 # bound for reconnect + fresh telemetry after each restart
 
 export IEG_MQTT_HOST_PORT=0  # random loopback ports
 export IEG_OPCUA_HOST_PORT=0
@@ -54,6 +58,43 @@ fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
+
+# Starts mosquitto_sub on industrial/# writing to $1 and returns once it is subscribed, proven
+# by receiving a probe published outside industrial/ (retried, e.g. while the broker restarts).
+start_subscriber() {
+    local file="$1"
+    : >"$file"
+    compose exec -T mosquitto mosquitto_sub -t 'industrial/#' -t 'smoke/probe' -v \
+        -W "$TOPIC_TIMEOUT_S" >"$file" 2>"$work/subscriber.err" &
+    sub_pid=$!
+    for _ in $(seq 1 100); do
+        grep -q '^smoke/probe ' "$file" && return 0
+        if ! kill -0 "$sub_pid" 2>/dev/null; then # broker not accepting yet: start again
+            wait "$sub_pid" 2>/dev/null || true
+            compose exec -T mosquitto mosquitto_sub -t 'industrial/#' -t 'smoke/probe' -v \
+                -W "$TOPIC_TIMEOUT_S" >"$file" 2>"$work/subscriber.err" &
+            sub_pid=$!
+        fi
+        compose exec -T mosquitto mosquitto_pub -t smoke/probe -m ready >/dev/null 2>&1 || true
+        sleep 0.2
+    done
+    fail "subscriber did not become ready"
+}
+
+# The gateway container must be the same, still-running process (PID 1 of an unchanged
+# container start), i.e. it survived the restart of a dependency.
+gateway_id=""
+gateway_started_at=""
+assert_same_gateway_running() {
+    local id state
+    id="$(compose ps -q edge-gateway)"
+    [[ "$id" == "$gateway_id" ]] || fail "edge-gateway container changed ($gateway_id -> $id)"
+    state="$(docker inspect -f '{{.State.Running}} {{.State.StartedAt}} {{.RestartCount}}' "$id")"
+    [[ "$state" == "true $gateway_started_at 0" ]] ||
+        fail "edge-gateway is not the same running process (state: $state)"
+}
+
+utc_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 
 # Topic -> "asset|tag|unit", per configs/gateway.example.yaml.
 readonly EXPECTED=(
@@ -118,6 +159,60 @@ print(f"validated {count} messages on {len(seen)} topics")
 sys.exit(1 if errors else 0)
 '
 
+# Reads "topic payload" lines on stdin; succeeds once every topic given after the first two
+# arguments has a valid JSON payload whose timestamp field (argv[2]) is later than argv[1].
+readonly FRESHNESS_CHECKER='
+import json, sys
+since, field, topics = sys.argv[1], sys.argv[2], sys.argv[3:]
+fresh = dict.fromkeys(topics, 0)
+for line in sys.stdin:
+    topic, _, payload = line.rstrip("\n").partition(" ")
+    if topic not in fresh:
+        continue
+    try:
+        stamp = json.loads(payload).get(field)
+    except (json.JSONDecodeError, AttributeError):
+        print(f"  invalid payload on {topic}: {payload}")
+        sys.exit(2)
+    if isinstance(stamp, str) and stamp > since:
+        fresh[topic] += 1
+print("  fresh messages:", ", ".join(f"{topic}={count}" for topic, count in fresh.items()))
+sys.exit(0 if all(fresh.values()) else 1)
+'
+readonly CONTINUOUS_TOPICS=(
+    "industrial/site01/line01/press01/pressure"
+    "industrial/site01/line01/oven01/temperature"
+)
+
+# Restarts service $1, then requires that the same gateway process logs the given reconnect
+# patterns and publishes fresh telemetry (timestamp field $2 later than the restart).
+verify_recovery_after_restart() {
+    local service="$1" field="$2"
+    shift 2
+    local before since deadline
+    before="$(utc_now)"
+    compose restart "$service" >/dev/null
+    since="$(utc_now)"
+    start_subscriber "$work/recovery-$service.txt"
+    deadline=$((SECONDS + RECOVERY_TIMEOUT_S))
+    until compose exec -T plant-simulator python -c "$FRESHNESS_CHECKER" "$since" "$field" \
+        "${CONTINUOUS_TOPICS[@]}" <"$work/recovery-$service.txt" >"$work/freshness.txt" 2>&1; do
+        grep -q 'invalid payload' "$work/freshness.txt" && fail "$(cat "$work/freshness.txt")"
+        ((SECONDS < deadline)) ||
+            fail "no fresh telemetry within ${RECOVERY_TIMEOUT_S}s after restarting $service"
+        sleep 1
+    done
+    cat "$work/freshness.txt"
+    stop_subscriber
+    assert_same_gateway_running
+    local logs pattern
+    logs="$(compose logs --no-color --since "$before" edge-gateway)"
+    for pattern in "$@"; do
+        grep -Eq "$pattern" <<<"$logs" ||
+            fail "gateway log since the $service restart lacks '$pattern'"
+    done
+}
+
 topics_seen() {
     local missing=0 entry
     for entry in "${EXPECTED[@]}"; do
@@ -133,19 +228,12 @@ echo "==> starting mosquitto and plant-simulator"
 compose up -d --wait mosquitto plant-simulator
 
 echo "==> subscribing to industrial/# (before the gateway starts, to capture initial values)"
-compose exec -T mosquitto mosquitto_sub -t 'industrial/#' -t 'smoke/probe' -v \
-    -W "$TOPIC_TIMEOUT_S" >"$work/messages.txt" 2>"$work/subscriber.err" &
-sub_pid=$!
-# Confirm the subscription is active with a probe outside industrial/ before starting the gateway.
-for _ in $(seq 1 50); do
-    grep -q '^smoke/probe ' "$work/messages.txt" && break
-    compose exec -T mosquitto mosquitto_pub -t smoke/probe -m ready >/dev/null 2>&1 || true
-    sleep 0.2
-done
-grep -q '^smoke/probe ' "$work/messages.txt" || fail "subscriber did not become ready"
+start_subscriber "$work/messages.txt"
 
 echo "==> starting edge-gateway"
 compose up -d edge-gateway
+gateway_id="$(compose ps -q edge-gateway)"
+gateway_started_at="$(docker inspect -f '{{.State.StartedAt}}' "$gateway_id")"
 
 echo "==> waiting for the ${#EXPECTED[@]} expected topics"
 deadline=$((SECONDS + TOPIC_TIMEOUT_S - 10))
@@ -166,8 +254,17 @@ for pattern in 'event=started' 'component=opcua .*state=Connected' 'component=mq
     grep -Eq "$pattern" <<<"$gateway_logs" || fail "gateway log lacks '$pattern'"
 done
 
+echo "==> restarting mosquitto: the same gateway must reconnect and resume publishing"
+verify_recovery_after_restart mosquitto edge_timestamp \
+    '\[mqtt\] event=connection_lost' '\[mqtt\] event=connected'
+
+echo "==> restarting plant-simulator: the same gateway must reconnect and restore subscriptions"
+verify_recovery_after_restart plant-simulator source_timestamp \
+    '\[opcua\] event=connection_lost' '\[opcua\] event=connected .*items=7 failed_items=0'
+
 echo "==> stopping edge-gateway with SIGTERM"
-container="$(compose ps -q edge-gateway)"
+assert_same_gateway_running
+container="$gateway_id"
 start=$SECONDS
 compose stop -t "$STOP_GRACE_S" edge-gateway >/dev/null
 elapsed=$((SECONDS - start))
