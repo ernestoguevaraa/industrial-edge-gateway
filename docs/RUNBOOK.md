@@ -315,12 +315,10 @@ info [mqtt] event=connected broker=tcp://mosquitto:1883 client_id=ieg-gateway-01
 info [opcua] event=connected endpoint=opc.tcp://plant-simulator:4840 publishing_interval_ms=1000 items=7 failed_items=0
 ```
 
-Known cosmetic log noise:
-
-- At startup the MQTT library prints its "Trace Output" banner, which currently appears as
-  `warning [mqtt] event=paho_trace` lines; it does not indicate a problem.
-- `warning [opcua] event=open62541_log message="skip verifying ApplicationURI for the
-  SecurityPolicy ...#None"` is expected with the unsecured MVP 1 connection.
+Expected warning: `warning [opcua] event=open62541_log message="skip verifying ApplicationURI for
+the SecurityPolicy ...#None"` appears with the unsecured MVP 1 connection and does not indicate a
+problem. The MQTT library's startup banner is logged at debug level
+(`debug [mqtt] event=paho_trace`), visible only with `IEG_LOG_LEVEL=debug`.
 
 ## 13. Common Problems
 
@@ -411,7 +409,7 @@ producers, drains its queue for up to `runtime.shutdown_drain_timeout_ms`, disco
 with code 0 (observed: about one second). Its last log lines are:
 
 ```text
-info [] event=shutdown_requested signal=SIGTERM
+info [gateway] event=shutdown_requested signal=SIGTERM
 info [runtime] event=stopping
 info [opcua] event=stopped endpoint=opc.tcp://plant-simulator:4840
 info [mqtt] event=stopped broker=tcp://mosquitto:1883

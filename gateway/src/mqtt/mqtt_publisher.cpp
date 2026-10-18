@@ -2,6 +2,7 @@
 
 #include "common/backoff.hpp"
 #include "mqtt/completion_registry.hpp"
+#include "mqtt/paho_trace.hpp"
 #include "mqtt/payload.hpp"
 #include "mqtt/reason_codes.hpp"
 #include "mqtt/submit_result.hpp"
@@ -60,10 +61,23 @@ spdlog::logger& logger()
     return *instance;
 }
 
+spdlog::level::level_enum to_spdlog(detail::TraceSeverity severity) noexcept
+{
+    switch (severity) {
+    case detail::TraceSeverity::Debug:
+        return spdlog::level::debug;
+    case detail::TraceSeverity::Warning:
+        return spdlog::level::warn;
+    case detail::TraceSeverity::Error:
+        return spdlog::level::err;
+    }
+    return spdlog::level::err;
+}
+
 void forward_paho_trace(enum MQTTASYNC_TRACE_LEVELS level, char* message)
 {
     if (message != nullptr) {
-        logger().log(level >= MQTTASYNC_TRACE_SEVERE ? spdlog::level::err : spdlog::level::warn,
+        logger().log(to_spdlog(detail::paho_trace_severity(static_cast<int>(level))),
                      "event=paho_trace message=\"{}\"", message);
     }
 }

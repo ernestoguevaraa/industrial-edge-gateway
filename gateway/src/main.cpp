@@ -19,6 +19,11 @@ constexpr int kExitConfigError = 2;
 
 void configure_logging()
 {
+    // Lifecycle lines from main() render as [gateway]; component loggers (opcua, mqtt, runtime)
+    // share the default logger's sinks and level.
+    const auto& base = spdlog::default_logger();
+    spdlog::set_default_logger(
+        std::make_shared<spdlog::logger>("gateway", base->sinks().begin(), base->sinks().end()));
     spdlog::set_pattern("%Y-%m-%dT%H:%M:%S.%eZ %l [%n] %v", spdlog::pattern_time_type::utc);
     const char* level =
         std::getenv("IEG_LOG_LEVEL"); // NOLINT(concurrency-mt-unsafe): no threads yet

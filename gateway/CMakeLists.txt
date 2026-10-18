@@ -28,7 +28,7 @@ target_link_libraries(gateway_output_api INTERFACE gateway_domain)
 # MQTT 5 publisher. Paho is linked PRIVATE so it cannot leak into dependants; the private
 # headers under src/ are only reachable by this target (and its unit tests).
 add_library(gateway_mqtt STATIC src/mqtt/mqtt_publisher.cpp src/mqtt/payload.cpp src/mqtt/reason_codes.cpp
-                                src/mqtt/submit_result.cpp src/mqtt/topic.cpp)
+                                src/mqtt/submit_result.cpp src/mqtt/topic.cpp src/mqtt/paho_trace.cpp)
 target_include_directories(gateway_mqtt PRIVATE src)
 target_link_libraries(gateway_mqtt PUBLIC gateway_output_api PRIVATE eclipse-paho-mqtt-c::paho-mqtt3a-static
                                                                      spdlog::spdlog)

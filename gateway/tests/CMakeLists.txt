@@ -12,6 +12,7 @@ add_executable(
   opcua/status_code_test.cpp
   mqtt/completion_registry_test.cpp
   mqtt/mqtt_publisher_test.cpp
+  mqtt/paho_trace_test.cpp
   mqtt/payload_reason_test.cpp
   mqtt/submit_result_test.cpp
   mqtt/topic_test.cpp
