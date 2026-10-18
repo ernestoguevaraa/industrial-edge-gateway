@@ -35,7 +35,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y ninja-build libmbedtls-dev mosquitto
           echo "IEG_MOSQUITTO=/usr/sbin/mosquitto" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
