@@ -1,0 +1,11 @@
+# Build context of the gateway image (docker/gateway/Dockerfile, context = repository root).
+# Whitelist: exclude everything, then re-include only what the image build needs. This keeps
+# local build directories, .git and the simulator out of the context. The simulator image
+# uses its own context (simulator/) and simulator/.dockerignore.
+*
+!CMakeLists.txt
+!cmake
+!gateway
+!configs/gateway.example.yaml
+# Not needed: the image is built with GATEWAY_BUILD_TESTS=OFF.
+gateway/tests

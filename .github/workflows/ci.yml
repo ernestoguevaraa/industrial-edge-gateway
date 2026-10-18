@@ -80,6 +80,17 @@ jobs:
       - name: Build Docker image
         run: docker build -t plant-simulator:ci simulator
 
+  compose-demo:
+    name: Compose demo smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run Compose demo smoke test
+        # Builds the gateway and simulator images, runs the stack, checks the seven MQTT topics
+        # and payloads, and verifies a clean SIGTERM shutdown (scripts/compose-smoke-test.sh).
+        run: scripts/compose-smoke-test.sh
+
   format:
     name: clang-format
     runs-on: ubuntu-24.04

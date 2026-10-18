@@ -70,24 +70,40 @@ These are planned for later milestones.
 }
 ```
 
-## Planned demo
+## Quick start
+
+Requires Docker with the Compose plugin. Run from the repository root:
 
 ```bash
-docker compose up --build
+docker compose up --build -d --wait
+docker compose exec mosquitto mosquitto_sub -t 'industrial/#' -v
 ```
 
-Then:
+The first build compiles the gateway and its dependencies and takes several minutes; later
+builds reuse the build cache. The subscriber runs inside the broker container, so no MQTT client
+is needed on the host (with `mosquitto-clients` installed you can also run
+`mosquitto_sub -h localhost -p 1883 -t 'industrial/#' -v`).
 
-```bash
-mosquitto_sub -h localhost -t 'industrial/#' -v
-```
-
-Expected output:
+Example output, captured from the demo:
 
 ```text
-industrial/site01/line01/press01/pressure {...}
-industrial/site01/line01/oven01/temperature {...}
+industrial/site01/line01/press01/pressure {"asset":"site01.line01.press01","tag":"pressure","value":179.64,"unit":"bar","quality":"GOOD","source_timestamp":"2026-10-18T01:42:53.585Z","edge_timestamp":"2026-10-18T01:42:54.395Z","protocol":"opcua"}
+industrial/site01/line01/oven01/temperature {"asset":"site01.line01.oven01","tag":"temperature","value":648.9,"unit":"degC","quality":"GOOD","source_timestamp":"2026-10-18T01:42:53.585Z","edge_timestamp":"2026-10-18T01:42:54.395Z","protocol":"opcua"}
+industrial/site01/line01/press01/production_count {"asset":"site01.line01.press01","tag":"production_count","value":18,"unit":"units","quality":"GOOD","source_timestamp":"2026-10-18T01:42:55.086Z","edge_timestamp":"2026-10-18T01:42:55.395Z","protocol":"opcua"}
 ```
+
+Values change frequently for pressure, temperature and cycle time; production counters and
+machine states only change when the simulated equipment counts a part or changes state (see
+[docs/RUNBOOK.md](docs/RUNBOOK.md#5-verify-mqtt-output)).
+
+```bash
+docker compose logs -f edge-gateway   # gateway logs
+docker compose down                   # stop and remove the demo
+```
+
+The Compose stack is a reproducible reference/demo environment: anonymous MQTT, no TLS, no
+persistence, ports published on 127.0.0.1 only. It is not a hardened production deployment.
+See [docs/RUNBOOK.md](docs/RUNBOOK.md) for verification, failure tests and troubleshooting.
 
 ## Engineering goals
 
@@ -102,6 +118,6 @@ industrial/site01/line01/oven01/temperature {...}
 See:
 
 - `docs/ARCHITECTURE.md`
-- `docs/RUNBOOK.md`
+- `docs/RUNBOOK.md` (demo operation, smoke test, troubleshooting)
 - `docs/ISSUES.md`
 - `docs/adr/`

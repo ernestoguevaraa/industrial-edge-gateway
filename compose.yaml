@@ -1,0 +1,59 @@
+# MVP 1 demo stack: OPC UA plant simulator -> C++20 edge gateway -> Eclipse Mosquitto.
+#
+# A reproducible reference/demo environment (anonymous MQTT, no TLS, no persistence), not a
+# hardened production deployment. Host ports are published on 127.0.0.1 only.
+#
+#   docker compose up --build -d --wait
+#   docker compose exec mosquitto mosquitto_sub -t 'industrial/#' -v
+#   docker compose down
+name: industrial-edge-gateway
+
+services:
+  plant-simulator:
+    build: ./simulator
+    image: ieg/plant-simulator:mvp1
+    ports:
+      - "127.0.0.1:${IEG_OPCUA_HOST_PORT:-4840}:4840" # optional: browse with an OPC UA client
+    healthcheck:
+      # Test inherited from the image (TCP liveness); only the timing is tuned here.
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      - "127.0.0.1:${IEG_MQTT_HOST_PORT:-1883}:1883"
+    healthcheck:
+      # $SYS/broker/version is retained, so this returns as soon as the broker serves clients.
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/broker/version", "-C", "1", "-W", "3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  edge-gateway:
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+    image: ieg/edge-gateway:mvp1
+    command: ["/etc/ieg/gateway.yaml"]
+    volumes:
+      # The demo configuration (service names plant-simulator and mosquitto). Edit it and run
+      # `docker compose restart edge-gateway`; no rebuild needed.
+      - ./configs/gateway.example.yaml:/etc/ieg/gateway.yaml:ro
+    environment:
+      IEG_LOG_LEVEL: info
+    depends_on:
+      # Only reduces startup noise: the gateway reconnects to both services on its own.
+      plant-simulator:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    # Bounded shutdown takes at most a few seconds (queue drain, OPC UA and MQTT teardown).
+    stop_grace_period: 15s
