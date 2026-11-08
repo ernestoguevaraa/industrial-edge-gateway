@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -82,8 +83,9 @@ TEST(ConfigLoader, LoadsRepositoryExampleFile)
 {
     const auto config = load_config_file(IEG_EXAMPLE_CONFIG_PATH);
 
-    EXPECT_EQ(config.opcua.endpoint, "opc.tcp://plant-simulator:4840");
-    EXPECT_EQ(config.opcua.subscription_interval, std::chrono::milliseconds{1000});
+    const OpcUaConfig expected_opcua{.endpoint = "opc.tcp://plant-simulator:4840",
+                                     .subscription_interval = std::chrono::milliseconds{1000}};
+    EXPECT_EQ(config.opcua, std::optional{expected_opcua});
     EXPECT_EQ(config.mqtt.host, "mosquitto");
     EXPECT_EQ(config.mqtt.port, 1883);
     EXPECT_EQ(config.mqtt.qos, MqttQos::AtLeastOnce);
@@ -108,7 +110,9 @@ TEST(ConfigLoader, ParsesMinimalConfiguration)
 {
     const auto config = parse_config(TestYaml{}.str());
 
-    EXPECT_EQ(config.opcua.endpoint, "opc.tcp://localhost:4840");
+    const OpcUaConfig expected_opcua{.endpoint = "opc.tcp://localhost:4840",
+                                     .subscription_interval = std::chrono::milliseconds{1000}};
+    EXPECT_EQ(config.opcua, std::optional{expected_opcua});
     EXPECT_EQ(config.mqtt.port, 1883);
     ASSERT_THAT(config.assets, SizeIs(1));
     ASSERT_THAT(config.assets[0].nodes, SizeIs(1));
@@ -253,9 +257,8 @@ TEST(ConfigLoader, RejectsNonMappingRoot)
 
 TEST(ConfigLoader, RejectsMissingSections)
 {
-    EXPECT_THAT(errors_for("{}"), ElementsAre(HasSubstr("missing required key 'opcua'"),
-                                              HasSubstr("missing required key 'mqtt'"),
-                                              HasSubstr("missing required key 'assets'")));
+    EXPECT_THAT(errors_for("{}"), ElementsAre(HasSubstr("missing required key 'mqtt'"),
+                                              HasSubstr("no acquisition source configured")));
 }
 
 TEST(ConfigLoader, RejectsMissingRequiredKey)

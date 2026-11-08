@@ -111,9 +111,14 @@ public:
          std::unique_ptr<output::ITelemetryPublisher> publisher, RuntimeOptions options)
         : table_(config), options_(options), queue_(options.queue_capacity),
           source_(std::move(source)), publisher_(std::move(publisher)),
-          item_counters_(table_.size()), endpoint_(config.opcua.endpoint),
+          item_counters_(table_.size()),
+          endpoint_(config.opcua ? config.opcua->endpoint : std::string{}),
           broker_(config.mqtt.host + ":" + std::to_string(config.mqtt.port))
     {
+        if (!config.modbus.devices.empty()) {
+            // Never silently ignore configured sources: Modbus TCP acquisition does not exist yet.
+            throw std::invalid_argument("GatewayRuntime does not support Modbus TCP sources yet");
+        }
         if (!source_ || !publisher_) {
             throw std::invalid_argument(
                 "GatewayRuntime needs an acquisition source and a publisher");

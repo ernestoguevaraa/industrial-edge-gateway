@@ -1,3 +1,4 @@
+#include "ieg/config/config_loader.hpp"
 #include "ieg/runtime/gateway_runtime.hpp"
 #include "runtime/telemetry_mapping.hpp"
 
@@ -6,6 +7,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,8 +22,8 @@ using ::testing::HasSubstr;
 config::GatewayConfig two_asset_config()
 {
     config::GatewayConfig config;
-    config.opcua.endpoint = "opc.tcp://localhost:4840";
-    config.opcua.subscription_interval = std::chrono::milliseconds{1000};
+    config.opcua = config::OpcUaConfig{.endpoint = "opc.tcp://localhost:4840",
+                                       .subscription_interval = std::chrono::milliseconds{1000}};
     config.mqtt.host = "localhost";
     config.mqtt.port = 1883;
     config.mqtt.topic_prefix = "industrial";
@@ -142,7 +144,26 @@ TEST(ReceiptTime, IsCurrentSystemTime)
     EXPECT_LE(receipt, std::chrono::time_point_cast<std::chrono::nanoseconds>(after));
 }
 
-// ---- MVP 1 validation ---------------------------------------------------------------------
+config::ModbusDeviceConfig modbus_device()
+{
+    return config::ModbusDeviceConfig{
+        .source_id = "press-plc",
+        .host = "modbus-simulator",
+        .port = 502,
+        .unit_id = 1,
+        .poll_interval = std::chrono::milliseconds{1000},
+        .timeout = std::chrono::milliseconds{500},
+        .points = {config::ModbusPointConfig{.asset = "site01.line01.press02",
+                                             .tag = "pressure",
+                                             .unit = "bar",
+                                             .table = config::ModbusTable::HoldingRegisters,
+                                             .offset = 0,
+                                             .type = config::ModbusDataType::UInt16,
+                                             .word_order = std::nullopt,
+                                             .scale = 0.1}}};
+}
+
+// ---- Startup validation -------------------------------------------------------------------
 
 TEST(ValidateForMvp1, AcceptsQos1)
 {
@@ -164,6 +185,41 @@ TEST(ValidateForMvp1, RejectsQos0And2Clearly)
             EXPECT_THAT(error.what(), HasSubstr("got " + std::to_string(static_cast<int>(qos))));
         }
     }
+}
+
+TEST(ValidateForMvp1, RejectsMixedConfigurationBecauseModbusIsNotImplemented)
+{
+    auto config = two_asset_config();
+    config.modbus.devices.push_back(modbus_device());
+    try {
+        validate_for_mvp1(config);
+        ADD_FAILURE() << "expected StartupError";
+    } catch (const StartupError& error) {
+        EXPECT_THAT(error.what(), HasSubstr("Modbus TCP acquisition is not implemented yet"));
+    }
+}
+
+TEST(ValidateForMvp1, RejectsModbusOnlyConfiguration)
+{
+    auto config = two_asset_config();
+    config.opcua.reset();
+    config.assets.clear();
+    config.modbus.devices.push_back(modbus_device());
+    try {
+        validate_for_mvp1(config);
+        ADD_FAILURE() << "expected StartupError";
+    } catch (const StartupError& error) {
+        EXPECT_THAT(error.what(), HasSubstr("Modbus TCP acquisition is not implemented yet"));
+        EXPECT_THAT(error.what(), HasSubstr("an OPC UA source (opcua and assets) is required"));
+    }
+}
+
+TEST(MakeGatewayRuntime, RejectsTheMixedExampleFileAtStartup)
+{
+    // The mixed example parses and validates, but must not start as if Modbus worked.
+    const auto config = config::load_config_file(IEG_MIXED_EXAMPLE_CONFIG_PATH);
+    ASSERT_FALSE(config.modbus.devices.empty());
+    EXPECT_THROW(static_cast<void>(make_gateway_runtime(config)), StartupError);
 }
 
 TEST(RuntimeOptionsFrom, UsesConfiguredQueueCapacityAndDrainTimeout)

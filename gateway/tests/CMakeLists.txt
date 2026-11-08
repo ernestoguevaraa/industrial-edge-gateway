@@ -3,6 +3,7 @@ include(GoogleTest)
 add_executable(
   gateway_tests
   config/config_loader_test.cpp
+  config/modbus_config_test.cpp
   core/bounded_queue_test.cpp
   domain/data_quality_test.cpp
   domain/telemetry_json_test.cpp
@@ -40,8 +41,9 @@ target_link_libraries(
           open62541
           GTest::gmock
           GTest::gtest_main)
-target_compile_definitions(gateway_tests
-                           PRIVATE IEG_EXAMPLE_CONFIG_PATH="${PROJECT_SOURCE_DIR}/configs/gateway.example.yaml")
+target_compile_definitions(
+  gateway_tests PRIVATE IEG_EXAMPLE_CONFIG_PATH="${PROJECT_SOURCE_DIR}/configs/gateway.example.yaml"
+                        IEG_MIXED_EXAMPLE_CONFIG_PATH="${PROJECT_SOURCE_DIR}/configs/gateway.mixed.example.yaml")
 gateway_set_warnings(gateway_tests)
 
 gtest_discover_tests(gateway_tests)
@@ -57,8 +59,10 @@ target_include_directories(gateway_integration_tests PRIVATE ${CMAKE_CURRENT_SOU
 target_link_libraries(
   gateway_integration_tests PRIVATE gateway_acquisition_opcua gateway_domain gateway_mqtt gateway_opcua_open62541
                                     eclipse-paho-mqtt-c::paho-mqtt3a-static GTest::gtest_main)
-target_compile_definitions(gateway_integration_tests PRIVATE IEG_SIMULATOR_DIR="${PROJECT_SOURCE_DIR}/simulator"
-                                                             IEG_GATEWAY_BINARY="$<TARGET_FILE:gateway>")
+target_compile_definitions(
+  gateway_integration_tests
+  PRIVATE IEG_SIMULATOR_DIR="${PROJECT_SOURCE_DIR}/simulator" IEG_GATEWAY_BINARY="$<TARGET_FILE:gateway>"
+          IEG_MIXED_EXAMPLE_CONFIG_PATH="${PROJECT_SOURCE_DIR}/configs/gateway.mixed.example.yaml")
 # The end-to-end test runs the real gateway executable.
 add_dependencies(gateway_integration_tests gateway)
 gateway_set_warnings(gateway_integration_tests)

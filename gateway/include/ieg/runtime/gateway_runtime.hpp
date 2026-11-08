@@ -62,7 +62,7 @@ struct ItemDiagnostics
     std::optional<acquisition::NativeStatusCode> last_no_value_status;
 };
 
-// Startup validation failure (configuration not usable by the MVP 1 runtime).
+// Startup validation failure (configuration not usable by this runtime).
 class StartupError : public std::runtime_error
 {
 public:
@@ -74,8 +74,8 @@ class GatewayRuntime
 public:
     // Builds the item table and the queue; no threads and no network activity.
     // Every configured node is requested from `source`; updates are accepted only for that
-    // source's id. Throws std::invalid_argument for unusable input (no nodes, empty adapters,
-    // zero capacity).
+    // source's id. Throws std::invalid_argument for unusable input (no OPC UA nodes, configured
+    // Modbus devices, empty adapters, zero capacity).
     GatewayRuntime(const config::GatewayConfig& config,
                    std::unique_ptr<acquisition::IAcquisitionSource> source,
                    std::unique_ptr<output::ITelemetryPublisher> publisher, RuntimeOptions options);
@@ -107,8 +107,9 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// Rejects configurations the MVP 1 runtime cannot honour (e.g. MQTT QoS other than 1).
-// Throws StartupError listing every problem.
+// Rejects configurations this runtime cannot honour: MQTT QoS other than 1, any Modbus TCP device
+// (parsed and validated by the loader, but acquisition is not implemented yet) and configurations
+// without the OPC UA source. Throws StartupError listing every problem.
 void validate_for_mvp1(const config::GatewayConfig& config);
 
 [[nodiscard]] RuntimeOptions runtime_options_from(const config::GatewayConfig& config);

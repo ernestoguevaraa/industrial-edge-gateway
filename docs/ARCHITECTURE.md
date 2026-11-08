@@ -237,7 +237,15 @@ assets:
 ```
 
 Invalid configuration causes a clear startup failure listing every problem (exit code 2). The
-loader accepts MQTT QoS 0–2; the MVP 1 runtime rejects anything other than QoS 1 at startup.
+loader accepts MQTT QoS 0–2; the runtime rejects anything other than QoS 1 at startup.
+
+The loader also accepts the MVP 2 multi-source schema: `opcua` + `assets` become optional when at
+least one Modbus TCP device is configured under `modbus.devices`, source IDs are unique, and
+`(asset, tag)` is unique across all sources. The schema, its validation rules and the Modbus data
+convention (zero-based offsets, big-endian bytes, explicit word order for 32-bit types) are
+documented in `docs/MVP2_MODBUS_DESIGN.md`; `configs/gateway.mixed.example.yaml` is a mixed
+example. Modbus TCP acquisition is not implemented yet, so the runtime rejects any configured
+Modbus device at startup (exit code 2) rather than running only the OPC UA part.
 
 ## 3. Threading Model
 
@@ -285,6 +293,7 @@ Examples:
 - duplicated asset/tag
 - unsupported value (e.g. MQTT QoS other than 1 in MVP 1)
 - missing OPC UA endpoint
+- no acquisition source, or Modbus devices configured (not supported by the runtime yet)
 
 ### Connectivity errors
 Non-fatal at startup and afterwards.

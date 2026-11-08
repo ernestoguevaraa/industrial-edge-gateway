@@ -14,8 +14,8 @@ namespace ieg::runtime::detail {
 
 // Normalized protocol identifier published in TelemetryPoint::protocol for OPC UA items.
 inline constexpr std::string_view kOpcUaProtocol = "opcua";
-// Source ID of the single OPC UA source configured by the MVP 1 YAML schema.
-inline constexpr std::string_view kOpcUaSourceId = "opcua-main";
+// Source ID of the single OPC UA source configured by the "opcua" section.
+inline constexpr std::string_view kOpcUaSourceId = config::kOpcUaSourceId;
 
 struct ItemBinding
 {
@@ -32,7 +32,7 @@ struct ItemBinding
 class ItemTable
 {
 public:
-    // Throws std::invalid_argument if the configuration has no nodes.
+    // Binds the OPC UA nodes (config.assets). Throws std::invalid_argument if there are none.
     explicit ItemTable(const config::GatewayConfig& config);
 
     [[nodiscard]] const std::vector<acquisition::Item>& items() const noexcept { return items_; }

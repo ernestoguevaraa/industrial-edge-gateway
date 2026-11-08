@@ -1,0 +1,83 @@
+# Mixed OPC UA + Modbus TCP configuration (MVP 2 schema preview).
+#
+# STATUS: this file is parsed and validated by the configuration loader, but Modbus TCP
+# acquisition is NOT implemented yet: the gateway rejects it at startup (exit code 2) with
+# "Modbus TCP acquisition is not implemented yet". Use configs/gateway.example.yaml for the
+# working OPC UA -> MQTT demo. Modbus TCP is plaintext and unauthenticated; use it only on
+# isolated networks.
+#
+# Modbus conventions (docs/MVP2_MODBUS_DESIGN.md):
+#  - offset is the ZERO-BASED PDU address in its table: holding register "40001" is
+#    table: holding_registers, offset: 0. 32-bit types use registers offset and offset+1.
+#  - Bytes inside each 16-bit register are big-endian (fixed by the Modbus specification).
+#  - 32-bit types (uint32, int32, float32) require word_order:
+#      high_word_first  register[offset] = bits 31..16  ("ABCD")
+#      low_word_first   register[offset] = bits 15..0   ("CDAB")
+#  - coils and discrete_inputs only support type bool; registers never do.
+#  - Without scale, integer types stay integers and float32 is a double; with scale the
+#    published value is raw * scale (a double).
+
+opcua:
+  endpoint: "opc.tcp://plant-simulator:4840"
+  subscription_interval_ms: 1000
+
+mqtt:
+  host: "mosquitto"
+  port: 1883
+  qos: 1
+  topic_prefix: "industrial"
+  client_id: "ieg-gateway-01"
+
+assets:
+  - asset: "site01.line01.press01"
+    nodes:
+      - node_id: "ns=2;s=Line01.Press01.State"
+        tag: "state"
+        unit: ""
+      - node_id: "ns=2;s=Line01.Press01.Pressure"
+        tag: "pressure"
+        unit: "bar"
+
+modbus:
+  devices:
+    - source_id: "compressor-plc"   # unique; "opcua-main" is reserved
+      host: "modbus-simulator"
+      port: 502                     # optional, default 502
+      unit_id: 1                    # 1..255
+      poll_interval_ms: 1000        # optional, default 1000 (100..3600000)
+      timeout_ms: 500               # optional, default 1000 (10..60000, <= poll_interval_ms)
+      points:
+        - asset: "site01.line01.compressor01"
+          tag: "running"
+          unit: ""
+          table: coils
+          offset: 0
+          type: bool
+        - asset: "site01.line01.compressor01"
+          tag: "outlet_pressure"
+          unit: "bar"
+          table: holding_registers
+          offset: 0                 # 40001
+          type: uint16
+          scale: 0.1                # raw 75 -> 7.5 bar
+        - asset: "site01.line01.compressor01"
+          tag: "ambient_temperature"
+          unit: "degC"
+          table: input_registers
+          offset: 0                 # 30001
+          type: int16
+          scale: 0.1
+        - asset: "site01.line01.compressor01"
+          tag: "run_hours"
+          unit: "h"
+          table: input_registers
+          offset: 1                 # 30002..30003
+          type: uint32
+          word_order: high_word_first
+        - asset: "site01.line01.compressor01"
+          tag: "motor_current"
+          unit: "A"
+          table: holding_registers
+          offset: 10                # 40011..40012
+          type: float32
+          word_order: low_word_first

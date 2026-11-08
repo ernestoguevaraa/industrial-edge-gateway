@@ -36,7 +36,8 @@ constexpr domain::Timestamp kSourceTime{std::chrono::sys_days{std::chrono::year{
 config::GatewayConfig mvp1_config()
 {
     config::GatewayConfig config;
-    config.opcua.endpoint = "opc.tcp://localhost:4840";
+    config.opcua = config::OpcUaConfig{.endpoint = "opc.tcp://localhost:4840",
+                                       .subscription_interval = std::chrono::milliseconds{1000}};
     config.mqtt.host = "localhost";
     config.mqtt.port = 1883;
     config.mqtt.topic_prefix = "industrial";

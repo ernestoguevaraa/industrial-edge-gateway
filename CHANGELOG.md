@@ -12,6 +12,15 @@
   of a decimal string; `ItemDiagnostics` reports `source_id`, `locator` and a protocol-neutral
   `last_no_value_status`.
 - The `event=started` log line also reports `source_id`.
+- Configuration: `opcua` and `assets` are optional when Modbus TCP devices are configured under
+  the new optional `modbus.devices` section (source ID, host, port, unit ID, poll interval,
+  timeout and points with table, zero-based offset, type, word order and scale). The loader
+  validates unique source IDs, global `(asset, tag)` uniqueness, address ranges and widths,
+  table/type combinations, finite non-zero scales, intervals and timeouts, and rejects
+  configurations without any source. `GatewayConfig::opcua` is now `std::optional`.
+- `configs/gateway.mixed.example.yaml` documents a mixed OPC UA + Modbus TCP deployment. Modbus
+  TCP acquisition is **not implemented yet**: the gateway rejects configured Modbus devices at
+  startup with exit code 2. The MVP 1 example and Compose demo are unchanged.
 
 ## v0.1.0 — MVP 1: OPC UA → MQTT vertical slice
 

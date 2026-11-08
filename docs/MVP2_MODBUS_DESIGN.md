@@ -1,11 +1,11 @@
 # MVP 2 — Modbus TCP acquisition design
 
-Status: In progress — increment 1 (common ingress model, OPC UA bridge, runtime migration) implemented; Modbus not started\
+Status: In progress — increments 2.2 (common ingress model, OPC UA bridge, runtime migration) and 2.3 (multi-source YAML configuration) implemented; Modbus transport/polling not started\
 Tracking: [Issue #1](https://github.com/ernestoguevaraa/industrial-edge-gateway/issues/1)
 
 ## Motivation
 
-MVP 1 had a protocol-independent `TelemetryPoint` and MQTT pipeline, but `GatewayRuntime` depended directly on `IOpcUaClient`, `opcua::DataChange`, OPC UA item identifiers and OPC UA mapping. Increment 1 removed that dependency (see "Implemented contract" below). Adding Modbus directly to that runtime would couple ingestion and orchestration to individual SDKs. Refactor the ingress contract before implementing Modbus.
+MVP 1 had a protocol-independent `TelemetryPoint` and MQTT pipeline, but `GatewayRuntime` depended directly on `IOpcUaClient`, `opcua::DataChange`, OPC UA item identifiers and OPC UA mapping. Increment 2.2 removed that dependency (see "Implemented contract" below). Adding Modbus directly to that runtime would couple ingestion and orchestration to individual SDKs. Refactor the ingress contract before implementing Modbus.
 
 ## Target pipeline
 
@@ -28,7 +28,7 @@ Introduce an SDK-neutral `ieg::acquisition` API (names may be adjusted during im
 
 Build an OPC UA acquisition bridge that preserves existing subscriptions, values, timestamps, quality, reconnection, and no-value diagnostics. Keep adapter SDK types out of common headers. Ensure shutdown stops **all** acquisition producers before closing the queue.
 
-## Implemented contract (increment 1)
+## Implemented contract (increment 2.2)
 
 `gateway/include/ieg/acquisition/acquisition_source.hpp` implements the proposal above with these
 decisions:
@@ -44,44 +44,79 @@ decisions:
 
 The runtime still owns exactly one source; the multi-source lifecycle is increment 4.
 
-## Configuration
+## Configuration (increment 2.3, implemented)
 
-Preserve the v0.1.0 YAML schema for OPC UA-only deployments unchanged. Extend the loader with an optional Modbus configuration. Do not require `opcua` when a Modbus-only deployment is configured. Validate global uniqueness of `(asset, tag)` across all sources, plus unique source IDs.
+The loader accepts OPC UA-only, Modbus-only and mixed deployments; the v0.1.0 YAML is unchanged
+and still valid. See `configs/gateway.mixed.example.yaml` (separate from the MVP 1 example).
 
-Illustrative proposal (not yet accepted by the loader):
+**Runtime status:** Modbus configuration is parsed and fully validated, but Modbus TCP
+acquisition is not implemented. `validate_for_mvp1()` and the `GatewayRuntime` constructor
+reject any configured Modbus device (and Modbus-only configurations), so the gateway exits with
+code 2 and `Modbus TCP acquisition is not implemented yet` instead of silently running only the
+OPC UA part.
 
-```yaml
-mqtt:
-  host: mosquitto
-  port: 1883
-  qos: 1
-  topic_prefix: industrial
+### Sources
 
-modbus:
-  devices:
-    - id: press-plc
-      host: modbus-simulator
-      port: 502
-      unit_id: 1
-      poll_interval_ms: 1000
-      timeout_ms: 1000
-      points:
-        - asset: site01.line01.press01
-          tag: pressure
-          unit: bar
-          table: holding_registers
-          address: 0        # ZERO-BASED PDU address, not 40001
-          type: uint16
-          scale: 0.1
-        - asset: site01.line01.press01
-          tag: operating
-          unit: ""
-          table: coils
-          address: 0
-          type: bool
-```
+- OPC UA is configured by `opcua` **and** `assets` together (one without the other is an error).
+  Its source ID is fixed: `opcua-main` (`config::kOpcUaSourceId`).
+- `modbus.devices` is an optional, non-empty list; each device is one acquisition source.
+- At least one source must exist; otherwise: `no acquisition source configured`.
+- `source_id`: 1–64 characters `[a-z0-9][a-z0-9_-]*`, unique across devices; `opcua-main` is
+  reserved.
+- `(asset, tag)` is unique across **all** sources (OPC UA nodes and every Modbus point), since it
+  defines the MQTT topic.
 
-Modbus register decoding includes `uint16`, `int16`, `uint32`, `int32`, and `float32`; 32-bit values use documented configurable register/word order (and byte order only if explicitly supported). Validate address boundaries (including multi-register widths), unit ID, unsupported table/type combinations, intervals, timeouts, and collisions.
+### Device keys
+
+| Key | Required | Range / default |
+|---|---|---|
+| `source_id` | yes | see above |
+| `host` | yes | non-empty, no whitespace |
+| `port` | no | 1–65535, default 502 |
+| `unit_id` | yes | 1–255 (0 is broadcast and never answers a read) |
+| `poll_interval_ms` | no | 100–3600000, default 1000 |
+| `timeout_ms` | no | 10–60000, must not exceed `poll_interval_ms`; default min(1000, poll interval) |
+| `points` | yes | non-empty list |
+
+### Point keys
+
+| Key | Required | Values |
+|---|---|---|
+| `asset`, `tag` | yes | same rules as OPC UA nodes |
+| `unit` | no | string, default `""` |
+| `table` | yes | `coils`, `discrete_inputs`, `holding_registers`, `input_registers` |
+| `offset` | yes | 0–65535, **zero-based PDU address** |
+| `type` | yes | `bool`, `uint16`, `int16`, `uint32`, `int32`, `float32` |
+| `word_order` | 32-bit types only (required there) | `high_word_first`, `low_word_first` |
+| `scale` | no, never for `bool` | finite, non-zero number |
+
+Unknown keys are rejected (e.g. `address` instead of `offset`), and every problem is reported at
+once with file, line and path.
+
+### Data convention
+
+- **Addressing.** `offset` is the zero-based address in the PDU, within its table. The
+  traditional "register numbers" are *not* accepted as such: holding register 40001 is
+  `table: holding_registers, offset: 0`, input register 30010 is `table: input_registers,
+  offset: 9`. Writing `offset: 40001` is legal but addresses PDU address 40001. A 32-bit value
+  occupies `offset` and `offset + 1`; it must end at or before address 65535.
+- **Tables and types.** Coils and discrete inputs are `bool` only. Registers carry `uint16`,
+  `int16`, `uint32`, `int32` or `float32`; reading single bits inside a register is not
+  supported.
+- **Byte order.** Inside each 16-bit register, bytes are big-endian (high byte first), as the
+  Modbus Application Protocol requires. This is fixed and not configurable.
+- **Word order.** Required for 32-bit types, rejected for others, so nothing defaults silently:
+  - `high_word_first`: register `offset` holds bits 31..16 ("ABCD", Modbus-conventional).
+  - `low_word_first`: register `offset` holds bits 15..0 ("CDAB", common in many PLCs).
+  - Byte-swapped layouts ("BADC", "DCBA") are not supported.
+- **Interpretation.** `int16`/`int32` are two's complement; `float32` is IEEE 754 binary32
+  assembled from the 32-bit pattern above.
+- **Published value type.** Without `scale`: `uint16`/`uint32` → unsigned integer,
+  `int16`/`int32` → signed integer, `float32` → double, `bool` → boolean. With `scale`:
+  `raw * scale` as a double (also for `scale: 1`).
+
+Example: registers `[0x4049, 0x0FDB]` as `float32` with `high_word_first` decode to `0x40490FDB`
+≈ 3.14159; the same registers with `low_word_first` decode to `0x0FDB4049`.
 
 ## Modbus behavior
 
@@ -94,8 +129,8 @@ Modbus register decoding includes `uint16`, `int16`, `uint32`, `int32`, and `flo
 
 ## Incremental implementation
 
-1. Common ingress model and tests; adapt OPC UA without changing MQTT output.
-2. Backward-compatible YAML configuration; Modbus-only and mixed validation.
+1. Common ingress model and tests; adapt OPC UA without changing MQTT output. *(Done: increment 2.2.)*
+2. Backward-compatible YAML configuration; Modbus-only and mixed validation. *(Done: increment 2.3; the runtime still rejects Modbus devices.)*
 3. Modbus codec tests, then Modbus TCP polling/reconnection adapter.
 4. Runtime multi-source lifecycle wiring and per-source diagnostics.
 5. Deterministic Modbus simulator, Compose demo, integration and E2E tests for mixed acquisition and recovery.

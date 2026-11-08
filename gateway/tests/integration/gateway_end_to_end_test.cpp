@@ -291,5 +291,18 @@ TEST_F(GatewayEndToEnd, QosOtherThan1FailsAtStartupWithExitCode2)
     EXPECT_NE(read_file(log).find("mqtt.qos must be 1"), std::string::npos) << read_file(log);
 }
 
+TEST_F(GatewayEndToEnd, MixedModbusConfigurationIsRejectedAtStartupWithExitCode2)
+{
+    // The mixed example is valid configuration, but Modbus TCP acquisition does not exist yet:
+    // the gateway must refuse to start instead of silently running only the OPC UA part.
+    const auto log = directory() / "gateway.log";
+    GatewayProcess gateway{IEG_MIXED_EXAMPLE_CONFIG_PATH, log};
+    EXPECT_EQ(gateway.wait_exit(10s), std::optional<int>{2});
+    const auto output = read_file(log);
+    EXPECT_NE(output.find("Modbus TCP acquisition is not implemented yet"), std::string::npos)
+        << output;
+    EXPECT_EQ(output.find("event=started"), std::string::npos) << output;
+}
+
 } // namespace
 } // namespace ieg::testing

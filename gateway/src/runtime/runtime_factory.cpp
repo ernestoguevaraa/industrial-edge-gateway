@@ -16,12 +16,20 @@ namespace ieg::runtime {
 void validate_for_mvp1(const config::GatewayConfig& config)
 {
     std::string errors;
+    if (!config.modbus.devices.empty()) {
+        errors += "\n - modbus: " + std::to_string(config.modbus.devices.size()) +
+                  " Modbus TCP device(s) configured, but Modbus TCP acquisition is not "
+                  "implemented yet; remove the modbus section";
+    }
+    if (!config.opcua) {
+        errors += "\n - opcua: an OPC UA source (opcua and assets) is required by this runtime";
+    }
     if (config.mqtt.qos != config::MqttQos::AtLeastOnce) {
         errors += "\n - mqtt.qos must be 1 (at least once) for MVP 1; got " +
                   std::to_string(static_cast<int>(config.mqtt.qos));
     }
     if (!errors.empty()) {
-        throw StartupError("configuration is not supported by the MVP 1 runtime:" + errors);
+        throw StartupError("configuration is not supported by this runtime:" + errors);
     }
 }
 
@@ -35,6 +43,10 @@ RuntimeOptions runtime_options_from(const config::GatewayConfig& config)
 std::unique_ptr<GatewayRuntime> make_gateway_runtime(const config::GatewayConfig& config)
 {
     validate_for_mvp1(config);
+    if (!config.opcua) {
+        throw StartupError("configuration has no OPC UA source"); // validate_for_mvp1() rejects it
+    }
+    const config::OpcUaConfig& opcua_config = *config.opcua;
     if (config.mqtt.client_id.empty()) {
         spdlog::warn("event=mqtt_client_id_fallback message=\"mqtt.client_id is not configured; "
                      "using the development fallback ieg-gateway-<hostname>, which is not stable "
@@ -46,8 +58,8 @@ std::unique_ptr<GatewayRuntime> make_gateway_runtime(const config::GatewayConfig
         auto source = std::make_unique<acquisition::OpcUaSource>(
             std::string{detail::kOpcUaSourceId},
             std::make_unique<opcua::Open62541Client>(opcua::Open62541ClientOptions{
-                .endpoint = config.opcua.endpoint,
-                .publishing_interval = config.opcua.subscription_interval}));
+                .endpoint = opcua_config.endpoint,
+                .publishing_interval = opcua_config.subscription_interval}));
         auto publisher = std::make_unique<mqtt::MqttPublisher>(
             mqtt::MqttPublisherOptions{.host = config.mqtt.host,
                                        .port = config.mqtt.port,

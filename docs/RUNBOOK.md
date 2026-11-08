@@ -385,6 +385,9 @@ Exit code 2 means the configuration was rejected; every problem is logged
 - missing mandatory configuration
 - duplicate asset/tag definition
 - unsupported configuration value (e.g. `mqtt.qos` other than 1 in MVP 1)
+- a `modbus` section (e.g. `configs/gateway.mixed.example.yaml`): the MVP 2 Modbus schema is
+  validated, but Modbus TCP acquisition is not implemented yet, so the gateway logs
+  `Modbus TCP acquisition is not implemented yet` and exits with code 2
 
 Exit code 1 means a component failed to start (`event=start_failed`). Configuration failures are
 intentionally fatal.

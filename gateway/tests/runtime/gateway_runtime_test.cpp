@@ -35,7 +35,8 @@ constexpr const char* kSourceId = "opcua-main";
 config::GatewayConfig test_config()
 {
     config::GatewayConfig config;
-    config.opcua.endpoint = "opc.tcp://localhost:4840";
+    config.opcua = config::OpcUaConfig{.endpoint = "opc.tcp://localhost:4840",
+                                       .subscription_interval = std::chrono::milliseconds{1000}};
     config.mqtt.host = "localhost";
     config.mqtt.port = 1883;
     config.mqtt.topic_prefix = "industrial";
@@ -307,11 +308,12 @@ TEST(GatewayRuntime, PublisherStartFailureNeverStartsOrStopsTheSource)
     EXPECT_THROW(harness.runtime().start(), std::runtime_error);
 }
 
-bool construction_rejected(std::unique_ptr<acquisition::IAcquisitionSource> source)
+bool construction_rejected(std::unique_ptr<acquisition::IAcquisitionSource> source,
+                           const config::GatewayConfig& config = test_config())
 {
     try {
         const GatewayRuntime runtime{
-            test_config(), std::move(source),
+            config, std::move(source),
             std::make_unique<NiceMock<output::testing::MockTelemetryPublisher>>(),
             RuntimeOptions{}};
         return false;
@@ -325,6 +327,23 @@ TEST(GatewayRuntime, RejectsMissingSourceOrSourceWithoutId)
     EXPECT_TRUE(construction_rejected(nullptr));
     EXPECT_TRUE(construction_rejected(
         std::make_unique<NiceMock<acquisition::testing::MockAcquisitionSource>>("")));
+}
+
+TEST(GatewayRuntime, RejectsConfiguredModbusDevicesInsteadOfIgnoringThem)
+{
+    config::ModbusPointConfig point;
+    point.asset = "site01.line01.press02";
+    point.tag = "state";
+    config::ModbusDeviceConfig device;
+    device.source_id = "press-plc";
+    device.host = "modbus-simulator";
+    device.unit_id = 1;
+    device.points.push_back(point);
+    auto config = test_config();
+    config.modbus.devices.push_back(device);
+    EXPECT_TRUE(construction_rejected(
+        std::make_unique<NiceMock<acquisition::testing::MockAcquisitionSource>>(kSourceId),
+        config));
 }
 
 // ---- Data flow -------------------------------------------------------------------------------
