@@ -1,6 +1,6 @@
 # MVP 2 — Modbus TCP acquisition design
 
-Status: In progress — increments 2.2 (common ingress model, OPC UA bridge, runtime migration) and 2.3 (multi-source YAML configuration) implemented; Modbus transport/polling not started\
+Status: In progress — increments 2.2 (common ingress model, OPC UA bridge, runtime migration), 2.3 (multi-source YAML configuration) and 2.4 (data decoder) implemented; Modbus transport/polling not started\
 Tracking: [Issue #1](https://github.com/ernestoguevaraa/industrial-edge-gateway/issues/1)
 
 ## Motivation
@@ -118,6 +118,48 @@ once with file, line and path.
 Example: registers `[0x4049, 0x0FDB]` as `float32` with `high_word_first` decode to `0x40490FDB`
 ≈ 3.14159; the same registers with `low_word_first` decode to `0x0FDB4049`.
 
+## Data decoder (increment 2.4, implemented)
+
+`ieg::modbus::decode()` (`gateway/include/ieg/modbus/decoder.hpp`, target
+`gateway_modbus_decoder`) turns the data of one Modbus read into a `TelemetryValue` following the
+convention above. It is independent of sockets, transport and external libraries (only the
+header-only config and domain types), and is not wired into the runtime yet.
+
+Input is what the transport returns after parsing the PDU:
+- `RegisterBlock { table, start, values }`: 16-bit register values, `values[0]` at address
+  `start`. `register_from_bytes(high, low)` builds a value from its big-endian PDU byte pair.
+- `BitBlock { table, start, values }`: one element per coil/discrete input, `0` = false and any
+  other value = true.
+
+Decoding:
+- `uint16`/`int16` read one register; `uint32`/`int32`/`float32` read `offset` and `offset + 1`,
+  combined with shifts by word order (`high_word_first`: `(r0 << 16) | r1`; `low_word_first`:
+  `(r1 << 16) | r0`). The CPU's byte order never matters.
+- `int16`/`int32` use `std::bit_cast` to the signed type (two's complement); `float32` uses
+  `std::bit_cast<float>` (IEEE 754 binary32, enforced with `static_assert(is_iec559)`) and is
+  widened exactly to `double`.
+- Without `scale`: `bool` → `bool`, unsigned types → `std::uint64_t`, signed types →
+  `std::int64_t`, `float32` → `double`. With `scale`: `double(raw) * scale` (always a double).
+  Integer-to-double conversion is exact (at most 32 significant bits).
+
+Error policy: `decode()` never throws for bad data or options; it returns a `DecodeResult` that
+holds either the value or a `DecodeError`, and never clamps, substitutes or guesses a value:
+
+| `DecodeError` | Cause |
+|---|---|
+| `InsufficientData` | the block does not contain every address of the point (offset before the block start, or offset + width past its end) |
+| `TableMismatch` | the block was read from a different table than the point's |
+| `TypeTableMismatch` | `bool` from registers, or a register type from coils/discrete inputs |
+| `InvalidWordOrder` | `word_order` missing for a 32-bit type or present for another type |
+| `InvalidScale` | `scale` zero or not finite, or present for `bool` |
+| `NonFiniteValue` | `float32` NaN/±infinity, or a scaled result that overflows to infinity |
+
+The configuration loader already rejects invalid options; the decoder checks them again so it is
+safe on its own. Bounds are checked before any element is read. `to_string(DecodeError)` gives a
+stable snake_case name for logs and diagnostics. Unit tests cover minimum/maximum, negative and
+zero values, IEEE 754 patterns (signed zero, subnormal, extremes, NaN, infinities), both word
+orders, scaling and every error; they also pass under AddressSanitizer and UBSan.
+
 ## Modbus behavior
 
 - Prefer a maintained Modbus library (evaluate libmodbus before committing to a dependency). Keep the transport library private to the adapter target.
@@ -131,7 +173,7 @@ Example: registers `[0x4049, 0x0FDB]` as `float32` with `high_word_first` decode
 
 1. Common ingress model and tests; adapt OPC UA without changing MQTT output. *(Done: increment 2.2.)*
 2. Backward-compatible YAML configuration; Modbus-only and mixed validation. *(Done: increment 2.3; the runtime still rejects Modbus devices.)*
-3. Modbus codec tests, then Modbus TCP polling/reconnection adapter.
+3. Modbus codec tests, then Modbus TCP polling/reconnection adapter. *(Codec done: increment 2.4; transport and polling pending.)*
 4. Runtime multi-source lifecycle wiring and per-source diagnostics.
 5. Deterministic Modbus simulator, Compose demo, integration and E2E tests for mixed acquisition and recovery.
 6. README, runbook, architecture and changelog updates; CI and release verification.

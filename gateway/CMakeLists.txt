@@ -30,6 +30,12 @@ target_include_directories(gateway_acquisition_opcua PUBLIC include)
 target_link_libraries(gateway_acquisition_opcua PUBLIC gateway_acquisition_api gateway_opcua_api)
 gateway_set_warnings(gateway_acquisition_opcua)
 
+# Transport-independent Modbus data decoder. Only the header-only configuration and domain types
+# are used (include path, no link dependency), so it needs no external library.
+add_library(gateway_modbus_decoder STATIC src/modbus/decoder.cpp)
+target_include_directories(gateway_modbus_decoder PUBLIC include)
+gateway_set_warnings(gateway_modbus_decoder)
+
 # Protocol-neutral output publisher abstraction (header-only; no MQTT dependency).
 add_library(gateway_output_api INTERFACE)
 target_include_directories(gateway_output_api INTERFACE include)

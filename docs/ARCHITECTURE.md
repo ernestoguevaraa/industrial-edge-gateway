@@ -337,6 +337,8 @@ transitions and a periodic summary (delivered, dropped and failed counts, queue 
 - Bounded queue, publisher and runtime behavior with mocks, including concurrency and shutdown
 - The acquisition contract on `OpcUaSource` (mapping, native status, lifecycle and start
   failures), and the runtime wired to the real `OpcUaSource` over a mocked OPC UA client
+- Multi-source configuration (Modbus schema validation) and the transport-independent Modbus data
+  decoder (`ieg::modbus::decode`; not yet used by the runtime)
 
 ### Integration tests
 
@@ -378,7 +380,7 @@ TLS, certificates and mTLS are planned for a later milestone.
 
 ```text
 MVP 1  OPC UA -> MQTT                      (v0.1.0, implemented)
-MVP 2  Modbus + common acquisition model   (in progress: common acquisition API done)
+MVP 2  Modbus + common acquisition model   (in progress: acquisition API, config, decoder done)
 MVP 3  SQLite store-and-forward
 MVP 4  metrics / observability
 v1.0   ISA-95 asset modeling + failure scenarios

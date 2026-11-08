@@ -18,6 +18,11 @@
   validates unique source IDs, global `(asset, tag)` uniqueness, address ranges and widths,
   table/type combinations, finite non-zero scales, intervals and timeouts, and rejects
   configurations without any source. `GatewayConfig::opcua` is now `std::optional`.
+- Transport-independent Modbus data decoder (`ieg::modbus::decode`, target
+  `gateway_modbus_decoder`): bool from coils/discrete inputs, uint16/int16, uint32/int32 and
+  float32 with explicit word order, optional scale, and an explicit `DecodeResult`/`DecodeError`
+  policy (insufficient data, table/type mismatch, invalid word order or scale, non-finite values).
+  Not yet used by the runtime.
 - `configs/gateway.mixed.example.yaml` documents a mixed OPC UA + Modbus TCP deployment. Modbus
   TCP acquisition is **not implemented yet**: the gateway rejects configured Modbus devices at
   startup with exit code 2. The MVP 1 example and Compose demo are unchanged.
