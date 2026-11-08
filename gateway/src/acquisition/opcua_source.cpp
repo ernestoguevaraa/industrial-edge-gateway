@@ -30,7 +30,10 @@ OpcUaSource::OpcUaSource(std::string source_id, std::unique_ptr<opcua::IOpcUaCli
     }
 }
 
-OpcUaSource::~OpcUaSource() { stop(); }
+OpcUaSource::~OpcUaSource()
+{
+    stop();
+}
 
 void OpcUaSource::start(std::vector<Item> items, Callbacks callbacks)
 {
@@ -54,8 +57,8 @@ void OpcUaSource::start(std::vector<Item> items, Callbacks callbacks)
     // Capture by value: the underlying client retains callbacks beyond this stack frame.
     opcua::ClientCallbacks forwarded{
         .on_data_change =
-            [source_id = source_id_, cb = std::move(callbacks.on_update)](
-                const opcua::DataChange& data) {
+            [source_id = source_id_,
+             cb = std::move(callbacks.on_update)](const opcua::DataChange& data) {
                 cb(Update{.source_id = source_id,
                           .item_id = data.id,
                           .value = data.value,
@@ -64,8 +67,8 @@ void OpcUaSource::start(std::vector<Item> items, Callbacks callbacks)
                           .diagnostic = std::to_string(data.status_code)});
             },
         .on_status_change =
-            [source_id = source_id_, cb = std::move(callbacks.on_status)](
-                const opcua::ConnectionStatus& status) {
+            [source_id = source_id_,
+             cb = std::move(callbacks.on_status)](const opcua::ConnectionStatus& status) {
                 cb(Status{.source_id = source_id,
                           .state = map_state(status.state),
                           .detail = status.detail});

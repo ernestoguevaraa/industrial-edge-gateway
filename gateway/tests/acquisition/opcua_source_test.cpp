@@ -47,8 +47,7 @@ TEST(OpcUaSource, PreservesTelemetryAndNativeStatusAsDiagnostic)
     EXPECT_EQ(fake->items.front().id, 7U);
     EXPECT_EQ(fake->items.front().node_id, "ns=2;s=Press.Pressure");
 
-    const domain::Timestamp timestamp{
-        std::chrono::sys_days{std::chrono::year{2026} / 11 / 8}};
+    const domain::Timestamp timestamp{std::chrono::sys_days{std::chrono::year{2026} / 11 / 8}};
     fake->registered.on_status_change(
         opcua::ConnectionStatus{opcua::ConnectionState::Connected, "session active"});
     fake->registered.on_data_change(opcua::DataChange{
@@ -101,10 +100,8 @@ TEST(OpcUaSource, RejectsInvalidRequestWithoutStartingClient)
     auto client = std::make_unique<FakeOpcUaClient>();
     auto* fake = client.get();
     OpcUaSource source{"opcua-main", std::move(client)};
-    Callbacks callbacks{.on_update = [](const Update&) {},
-                        .on_status = [](const Status&) {}};
-    EXPECT_THROW(source.start({Item{1, "x"}, Item{1, "y"}}, callbacks),
-                 std::invalid_argument);
+    Callbacks callbacks{.on_update = [](const Update&) {}, .on_status = [](const Status&) {}};
+    EXPECT_THROW(source.start({Item{1, "x"}, Item{1, "y"}}, callbacks), std::invalid_argument);
     EXPECT_EQ(fake->starts, 0);
     source.start({Item{1, "ns=2;s=Good"}}, callbacks);
     EXPECT_THROW(source.start({Item{2, "ns=2;s=Other"}}, callbacks), std::logic_error);
