@@ -95,9 +95,11 @@ protocol adapters:
 - `Item { id, locator }`: what the runtime requests. Item IDs are unique within a source; the
   runtime keys items by `(source_id, item_id)`.
 - `Update { source_id, item_id, optional value, quality, optional source_timestamp,
-  optional native_status }`. `native_status` is the raw status in the protocol's own code space
-  (the OPC UA StatusCode, later e.g. a Modbus exception code). It is recorded and logged for
-  diagnostics but never interpreted; `quality` is the only protocol-independent quality.
+  optional native_status, diagnostic }`. `native_status` is the raw status in the protocol's own
+  code space (the OPC UA StatusCode, a Modbus exception code). It is recorded and logged for
+  diagnostics but never interpreted, and never manufactured for local failures; `diagnostic` is a
+  stable symbolic reason for those (e.g. `timeout`, `decode_non_finite_value`). `quality` is the
+  only protocol-independent quality.
 - `Status { source_id, state, detail }` with Connecting/Connected/Disconnected.
 - `IAcquisitionSource { id(), start(items, callbacks), stop() }`. Callbacks run serialized on
   source-owned threads and must not block. `start()` is called at most once (an invalid request
@@ -341,6 +343,9 @@ transitions and a periodic summary (delivered, dropped and failed counts, queue 
   decoder (`ieg::modbus::decode`; not yet used by the runtime)
 - The Modbus TCP client (`LibModbusClient`, libmodbus 3.1.10) against a deterministic in-process
   Modbus TCP server, and a scripted `FakeModbusClient` for future poller tests
+- The Modbus TCP acquisition source (`ModbusTcpSource`: read grouping, polling schedule,
+  reconnection, shutdown) with a fake device and a manual clock, and against the in-process
+  server
 
 ### Integration tests
 
@@ -383,7 +388,7 @@ TLS, certificates and mTLS are planned for a later milestone.
 ```text
 MVP 1  OPC UA -> MQTT                      (v0.1.0, implemented)
 MVP 2  Modbus + common acquisition model   (in progress: acquisition API, config, decoder,
-                                            TCP client done; polling and runtime pending)
+                                            TCP client, polling source done; runtime pending)
 MVP 3  SQLite store-and-forward
 MVP 4  metrics / observability
 v1.0   ISA-95 asset modeling + failure scenarios

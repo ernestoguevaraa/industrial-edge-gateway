@@ -75,7 +75,8 @@ void OpcUaSource::start(std::vector<Item> items, Callbacks callbacks)
                           .value = data.value,
                           .quality = data.quality,
                           .source_timestamp = data.source_timestamp,
-                          .native_status = data.status_code});
+                          .native_status = data.status_code,
+                          .diagnostic = {}});
             },
         .on_status_change =
             [source_id = source_id_,

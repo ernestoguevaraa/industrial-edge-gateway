@@ -135,7 +135,8 @@ acquisition::Update change(acquisition::ItemId id, double value,
                                .value = value,
                                .quality = quality,
                                .source_timestamp = std::nullopt,
-                               .native_status = 0U};
+                               .native_status = 0U,
+                               .diagnostic = {}};
 }
 
 acquisition::Update no_value(acquisition::ItemId id,
@@ -146,7 +147,8 @@ acquisition::Update no_value(acquisition::ItemId id,
                                .value = std::nullopt,
                                .quality = domain::DataQuality::Bad,
                                .source_timestamp = std::nullopt,
-                               .native_status = native_status};
+                               .native_status = native_status,
+                               .diagnostic = {}};
 }
 
 // Owns a runtime built around mocks and plays the adapters' worker threads.

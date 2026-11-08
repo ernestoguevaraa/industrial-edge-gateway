@@ -1,6 +1,6 @@
 # MVP 2 — Modbus TCP acquisition design
 
-Status: In progress — increments 2.2 (common ingress model, OPC UA bridge, runtime migration), 2.3 (multi-source YAML configuration), 2.4 (data decoder) and 2.5 (Modbus TCP transport client) implemented; polling and runtime integration not started\
+Status: In progress — increments 2.2 (common ingress model, OPC UA bridge, runtime migration), 2.3 (multi-source YAML configuration), 2.4 (data decoder), 2.5 (Modbus TCP transport client) and 2.6 (Modbus TCP poller / acquisition source) implemented; multi-source runtime integration not started\
 Tracking: [Issue #1](https://github.com/ernestoguevaraa/industrial-edge-gateway/issues/1)
 
 ## Motivation
@@ -254,6 +254,92 @@ preserve exception codes ≥ 12 (they become `EMBBADEXC`), so those are `Protoco
   timeouts and explicit reconnection, exception codes, protocol errors, connection loss,
   reconnect while connected, idempotent close and destruction.
 
+## Modbus TCP acquisition source (increment 2.6, implemented)
+
+`ModbusTcpSource` (`gateway/include/ieg/modbus/modbus_tcp_source.hpp`, target
+`gateway_modbus_source`) implements `acquisition::IAcquisitionSource` for one device by combining
+an `IModbusClient` (by default `LibModbusClient`) with the decoder. It is not yet created by the
+runtime (increment 2.7), so the gateway still rejects Modbus configurations at startup.
+
+### Items, updates and diagnostics
+
+- An item's locator is `modbus_point_locator(point)` = `"<asset>/<tag>"`, unique within a device;
+  `start()` accepts any non-empty subset of the device's points (unique IDs and locators).
+- Updates carry the source ID and item ID. `source_timestamp` is always empty: Modbus responses
+  have no sample timestamp (the runtime still adds its edge timestamp).
+- Success: quality `Good` and the decoded `TelemetryValue` (integers stay integers without
+  scale).
+- Failure: quality `Bad`, no value. `native_status` is set **only** for real Modbus exception
+  responses (the exception code); nothing is manufactured for local failures.
+- `acquisition::Update` gained a protocol-neutral `diagnostic` string (stable, symbolic, never
+  numeric; empty when there is nothing to report). The Modbus source uses
+  `to_string(ModbusErrorKind)` for read failures (`timeout`, `connection_lost`,
+  `protocol_error`, `modbus_exception`, ...) and `decode_<error>` for decoding failures (e.g.
+  `decode_non_finite_value`). The OPC UA source leaves it empty (its raw StatusCode is in
+  `native_status`).
+- Connection state is reported as for OPC UA: `Connecting` per attempt, `Connected`, and
+  `Disconnected` with a detail such as `timeout: ...`, `connection_failed: ...` or
+  `client_error: ...`; a deliberate `stop()` reports nothing.
+
+### Polling design
+
+- One worker thread per device owns the client: it is created through the factory, used, closed
+  and destroyed only on that thread. Requests are strictly sequential; callbacks run on the
+  worker, serialized.
+- `start()` validates the items, builds the read plan and starts the worker without waiting for
+  TCP. The worker connects and then polls.
+- Schedule (steady clock): the first cycle starts right after connecting; cycle *n* starts at
+  `t0 + n * poll_interval`. **Overrun policy:** if a cycle ends after one or more slots, the
+  missed slots are skipped (no back-to-back catch-up) and the next cycle starts at the first
+  future slot of the same grid. All waits are interruptible (`std::stop_token` +
+  `condition_variable_any`); there are no busy loops (the poll interval is at least 100 ms in the
+  configuration and must be positive).
+- Reconnection: after a failed connect or a lost connection, the worker waits
+  `min(initial * 2^n, max)` (defaults 500 ms .. 30 s), multiplied by a jitter factor in
+  `[1 - jitter, 1]` (default 0.2, seedable for deterministic tests), then reconnects explicitly.
+  The failure counter resets after a successful connection.
+
+### Read grouping policy
+
+- Points of the same table are merged into one request only while they are **contiguous or
+  overlapping**; a request never covers an address that no requested point uses (no gaps), never
+  mixes tables and never exceeds 125 registers / 2000 bits (configurable lower). Points are
+  ordered by address; a 32-bit point is never split across requests.
+- If a multi-point block answers with a Modbus exception (e.g. 0x02 Illegal Data Address because
+  one address in the range is not implemented), the block is split into single-point reads
+  immediately (same cycle) and permanently, so one bad address only affects its own point.
+- A timeout, connection loss or protocol error closes the connection (client contract): the items
+  of the failed block and of the rest of the cycle get `Bad` with that diagnostic, `Disconnected`
+  is reported, and the worker backs off before reconnecting. No request is retried within a
+  cycle.
+
+### Shutdown limits
+
+`stop()` is idempotent, safe before `start()` and after a failed start; when it returns the
+worker has been joined, so no callback is running or will run. It must not be called from a
+callback (detected: it then only requests the stop). Latency:
+
+- waiting for the next cycle or a backoff: immediate (measured 0 ms);
+- a request in progress: completes or times out first — at most `timeout_ms` (measured
+  297–301 ms with `timeout_ms = 300`); the worker checks the stop request before every request,
+  so at most one request is in flight even though a cycle may contain several;
+- a connect attempt: `timeout_ms` per resolved address, plus DNS resolution (`getaddrinfo`),
+  which has no guaranteed upper bound.
+
+### Tests
+
+- `poll_plan_test.cpp`: grouping (contiguity, gaps, tables, overlaps, limits, splitting, end of
+  the address space) and the schedule function.
+- `modbus_tcp_source_test.cpp`: the source with a thread-safe fake device and a manually stepped
+  clock (deterministic, no real sleeps for timing): typed updates, grouping, fixed grid and
+  overrun skipping, exception splitting, decode failures, timeouts and connection loss with
+  reconnection, exponential backoff and its reset, deterministic jitter, client factory failures,
+  client ownership by one worker thread, stop latency and no callbacks after stop.
+- `modbus_tcp_source_server_test.cpp`: the real client against the deterministic in-process
+  server: conversions for all four tables, exception codes on a kept connection, connection loss
+  and timeout recovery, unavailable server, and measured stop latency.
+- The Modbus tests also pass under AddressSanitizer/UBSan and ThreadSanitizer.
+
 ## Modbus behavior
 
 - Prefer a maintained Modbus library (evaluate libmodbus before committing to a dependency). Keep the transport library private to the adapter target.
@@ -267,7 +353,7 @@ preserve exception codes ≥ 12 (they become `EMBBADEXC`), so those are `Protoco
 
 1. Common ingress model and tests; adapt OPC UA without changing MQTT output. *(Done: increment 2.2.)*
 2. Backward-compatible YAML configuration; Modbus-only and mixed validation. *(Done: increment 2.3; the runtime still rejects Modbus devices.)*
-3. Modbus codec tests, then Modbus TCP polling/reconnection adapter. *(Codec: increment 2.4; transport client: increment 2.5; polling pending.)*
+3. Modbus codec tests, then Modbus TCP polling/reconnection adapter. *(Codec: 2.4; transport client: 2.5; polling source: 2.6.)*
 4. Runtime multi-source lifecycle wiring and per-source diagnostics.
 5. Deterministic Modbus simulator, Compose demo, integration and E2E tests for mixed acquisition and recovery.
 6. README, runbook, architecture and changelog updates; CI and release verification.

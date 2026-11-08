@@ -80,7 +80,8 @@ TEST(MakePoint, MapsValueMetadataAndTimestamps)
                                      .value = 180.5,
                                      .quality = domain::DataQuality::Good,
                                      .source_timestamp = kSourceTime,
-                                     .native_status = 0};
+                                     .native_status = 0,
+                                     .diagnostic = {}};
     const auto point = make_point(*table.find(0), change, kEdgeTime);
     const std::optional<domain::TelemetryPoint> expected{
         domain::TelemetryPoint{.asset = "site01.line01.press01",
@@ -103,7 +104,8 @@ TEST(MakePoint, KeepsUncertainAndBadQualityVisible)
                                          .value = 851.0,
                                          .quality = quality,
                                          .source_timestamp = kSourceTime,
-                                         .native_status = 0x808C0000U};
+                                         .native_status = 0x808C0000U,
+                                         .diagnostic = {}};
         const auto point = make_point(*table.find(2), change, kEdgeTime);
         EXPECT_TRUE(point.has_value() && point->quality == quality);
     }
@@ -117,7 +119,8 @@ TEST(MakePoint, AbsentSourceTimestampStaysAbsent)
                                      .value = std::string{"RUNNING"},
                                      .quality = domain::DataQuality::Good,
                                      .source_timestamp = std::nullopt,
-                                     .native_status = 0};
+                                     .native_status = 0,
+                                     .diagnostic = {}};
     const auto point = make_point(*table.find(1), change, kEdgeTime);
     EXPECT_TRUE(point.has_value() && !point->source_timestamp.has_value() &&
                 point->edge_timestamp == kEdgeTime);
@@ -131,7 +134,8 @@ TEST(MakePoint, NoValueNeverBecomesATelemetryPoint)
                                      .value = std::nullopt,
                                      .quality = domain::DataQuality::Bad,
                                      .source_timestamp = std::nullopt,
-                                     .native_status = 0x80340000U};
+                                     .native_status = 0x80340000U,
+                                     .diagnostic = {}};
     EXPECT_FALSE(make_point(*table.find(0), change, kEdgeTime).has_value());
 }
 

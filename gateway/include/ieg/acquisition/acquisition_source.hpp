@@ -40,8 +40,13 @@ struct Update
     domain::DataQuality quality{domain::DataQuality::Bad};
     // Absent when the source protocol does not provide a sample timestamp. Never substituted.
     std::optional<domain::Timestamp> source_timestamp;
-    // Raw protocol status exactly as received; absent if the protocol reports none.
+    // Raw protocol status exactly as received; absent if the protocol reports none. Never
+    // manufactured for local failures (timeouts, disconnections, decoding).
     std::optional<NativeStatusCode> native_status;
+    // Stable, machine-readable reason when the update has no value or Bad quality for a reason
+    // the protocol status does not express, e.g. "timeout", "connection_lost" or
+    // "decode_non_finite_value". Symbolic only (never a numeric code); empty otherwise.
+    std::string diagnostic;
 
     friend bool operator==(const Update&, const Update&) = default;
 };

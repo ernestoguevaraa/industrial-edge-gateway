@@ -137,7 +137,8 @@ TEST(OpcUaSource, PreservesValueQualityTimestampAndRawStatusCode)
                                               .value = 145.5,
                                               .quality = domain::DataQuality::Uncertain,
                                               .source_timestamp = kSourceTime,
-                                              .native_status = kUncertainInitialValue}};
+                                              .native_status = kUncertainInitialValue,
+                                              .diagnostic = {}}};
     EXPECT_EQ(harness.updates(), expected);
 }
 
@@ -157,7 +158,8 @@ TEST(OpcUaSource, KeepsMissingValueBadWithOriginalStatusCodeAndNoTimestamp)
                                               .value = std::nullopt,
                                               .quality = domain::DataQuality::Bad,
                                               .source_timestamp = std::nullopt,
-                                              .native_status = kBadNodeIdUnknown}};
+                                              .native_status = kBadNodeIdUnknown,
+                                              .diagnostic = {}}};
     EXPECT_EQ(harness.updates(), expected);
 }
 

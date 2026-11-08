@@ -50,6 +50,14 @@ target_include_directories(gateway_modbus_tcp PRIVATE src)
 target_link_libraries(gateway_modbus_tcp PUBLIC gateway_modbus_api PRIVATE libmodbus::libmodbus)
 gateway_set_warnings(gateway_modbus_tcp)
 
+# Modbus TCP acquisition source: polls one device with an IModbusClient (LibModbusClient by
+# default) on its own worker thread. Not wired into the runtime yet.
+add_library(gateway_modbus_source STATIC src/modbus/modbus_tcp_source.cpp src/modbus/poll_plan.cpp)
+target_include_directories(gateway_modbus_source PRIVATE src)
+target_link_libraries(gateway_modbus_source PUBLIC gateway_acquisition_api gateway_modbus_api PRIVATE gateway_modbus_tcp
+                                                                                              Threads::Threads)
+gateway_set_warnings(gateway_modbus_source)
+
 # Protocol-neutral output publisher abstraction (header-only; no MQTT dependency).
 add_library(gateway_output_api INTERFACE)
 target_include_directories(gateway_output_api INTERFACE include)

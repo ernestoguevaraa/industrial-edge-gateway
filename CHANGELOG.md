@@ -30,6 +30,13 @@
   error) with the native `errno` or exception code; protocol request limits validated before I/O.
   Not yet used by the runtime; the gateway executable does not link libmodbus. Build
   prerequisite: `libmodbus-dev`.
+- Modbus TCP acquisition source `ModbusTcpSource` (`IAcquisitionSource` for one device): one
+  owner thread per device, sequential requests, read grouping of contiguous points without gaps
+  (split into single-point reads after a Modbus exception), fixed-rate polling that skips missed
+  slots on overrun, bounded exponential reconnect backoff with seedable jitter, interruptible
+  waits and a joined, idempotent `stop()`. Not yet created by the runtime.
+- `acquisition::Update::diagnostic`: a stable symbolic reason for Bad updates without a native
+  status (e.g. `timeout`, `decode_non_finite_value`); empty for OPC UA.
 - `configs/gateway.mixed.example.yaml` documents a mixed OPC UA + Modbus TCP deployment. Modbus
   TCP acquisition is **not implemented yet**: the gateway rejects configured Modbus devices at
   startup with exit code 2. The MVP 1 example and Compose demo are unchanged.

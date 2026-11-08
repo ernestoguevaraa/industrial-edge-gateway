@@ -16,6 +16,9 @@ add_executable(
   modbus/libmodbus_client_test.cpp
   modbus/libmodbus_errors_test.cpp
   modbus/modbus_client_test.cpp
+  modbus/modbus_tcp_source_server_test.cpp
+  modbus/modbus_tcp_source_test.cpp
+  modbus/poll_plan_test.cpp
   mqtt/completion_registry_test.cpp
   mqtt/mqtt_publisher_test.cpp
   mqtt/paho_trace_test.cpp
@@ -37,6 +40,7 @@ target_link_libraries(
           gateway_acquisition_opcua
           gateway_domain
           gateway_modbus_decoder
+          gateway_modbus_source
           gateway_modbus_tcp
           libmodbus::libmodbus
           gateway_mqtt
