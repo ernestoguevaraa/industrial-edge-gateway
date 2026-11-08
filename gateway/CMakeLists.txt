@@ -20,6 +20,16 @@ target_include_directories(gateway_opcua_open62541 PRIVATE src)
 target_link_libraries(gateway_opcua_open62541 PUBLIC gateway_opcua_api PRIVATE open62541 spdlog::spdlog)
 gateway_set_warnings(gateway_opcua_open62541)
 
+# SDK-neutral acquisition API and OPC UA compatibility bridge.
+add_library(gateway_acquisition_api INTERFACE)
+target_include_directories(gateway_acquisition_api INTERFACE include)
+target_link_libraries(gateway_acquisition_api INTERFACE gateway_domain)
+
+add_library(gateway_acquisition_opcua STATIC src/acquisition/opcua_source.cpp)
+target_include_directories(gateway_acquisition_opcua PUBLIC include)
+target_link_libraries(gateway_acquisition_opcua PUBLIC gateway_acquisition_api gateway_opcua_api)
+gateway_set_warnings(gateway_acquisition_opcua)
+
 # Protocol-neutral output publisher abstraction (header-only; no MQTT dependency).
 add_library(gateway_output_api INTERFACE)
 target_include_directories(gateway_output_api INTERFACE include)
