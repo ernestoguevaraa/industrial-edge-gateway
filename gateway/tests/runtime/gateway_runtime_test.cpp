@@ -1,5 +1,5 @@
+#include "acquisition/mock_acquisition_source.hpp"
 #include "ieg/runtime/gateway_runtime.hpp"
-#include "opcua/mock_opcua_client.hpp"
 #include "output/mock_telemetry_publisher.hpp"
 
 #include <gmock/gmock.h>
@@ -29,6 +29,8 @@ using ::testing::InSequence;
 using ::testing::Invoke;
 using ::testing::NiceMock;
 using Clock = std::chrono::steady_clock;
+
+constexpr const char* kSourceId = "opcua-main";
 
 config::GatewayConfig test_config()
 {
@@ -124,14 +126,26 @@ private:
     bool released_{false};
 };
 
-opcua::DataChange change(opcua::ItemId id, double value,
-                         domain::DataQuality quality = domain::DataQuality::Good)
+acquisition::Update change(acquisition::ItemId id, double value,
+                           domain::DataQuality quality = domain::DataQuality::Good)
 {
-    return opcua::DataChange{.id = id,
-                             .value = value,
-                             .quality = quality,
-                             .status_code = 0,
-                             .source_timestamp = std::nullopt};
+    return acquisition::Update{.source_id = kSourceId,
+                               .item_id = id,
+                               .value = value,
+                               .quality = quality,
+                               .source_timestamp = std::nullopt,
+                               .native_status = 0U};
+}
+
+acquisition::Update no_value(acquisition::ItemId id,
+                             std::optional<acquisition::NativeStatusCode> native_status)
+{
+    return acquisition::Update{.source_id = kSourceId,
+                               .item_id = id,
+                               .value = std::nullopt,
+                               .quality = domain::DataQuality::Bad,
+                               .source_timestamp = std::nullopt,
+                               .native_status = native_status};
 }
 
 // Owns a runtime built around mocks and plays the adapters' worker threads.
@@ -142,15 +156,16 @@ public:
                                                       .drain_timeout = 2000ms,
                                                       .report_interval = 50ms})
     {
-        auto opcua = std::make_unique<NiceMock<opcua::testing::MockOpcUaClient>>();
+        auto source =
+            std::make_unique<NiceMock<acquisition::testing::MockAcquisitionSource>>(kSourceId);
         auto publisher = std::make_unique<NiceMock<output::testing::MockTelemetryPublisher>>();
-        opcua_ = opcua.get();
+        source_ = source.get();
         publisher_ = publisher.get();
-        ON_CALL(*opcua_, start(_, _))
+        ON_CALL(*source_, start(_, _))
             .WillByDefault(Invoke(
-                [this](std::vector<opcua::MonitoredItem> items, opcua::ClientCallbacks callbacks) {
+                [this](std::vector<acquisition::Item> items, acquisition::Callbacks callbacks) {
                     items_ = std::move(items);
-                    opcua_callbacks_ = std::move(callbacks);
+                    source_callbacks_ = std::move(callbacks);
                 }));
         ON_CALL(*publisher_, start(_))
             .WillByDefault(Invoke([this](output::PublisherStatusCallback callback) {
@@ -160,18 +175,18 @@ public:
             .WillByDefault(Invoke(
                 [this](const domain::TelemetryPoint& point) { return recorder_.publish(point); }));
         ON_CALL(*publisher_, stop()).WillByDefault(Invoke([this] { recorder_.release(); }));
-        runtime_ = std::make_unique<GatewayRuntime>(test_config(), std::move(opcua),
+        runtime_ = std::make_unique<GatewayRuntime>(test_config(), std::move(source),
                                                     std::move(publisher), options);
     }
 
-    // Plays the OPC UA adapter worker thread; returns how long the callback took.
-    std::chrono::nanoseconds fire(const opcua::DataChange& data)
+    // Plays the acquisition source worker thread; returns how long the callback took.
+    std::chrono::nanoseconds fire(const acquisition::Update& data)
     {
         Clock::duration took{};
         std::thread adapter([&] {
             adapter_thread_ = std::this_thread::get_id();
             const auto start = Clock::now();
-            opcua_callbacks_.on_data_change(data);
+            source_callbacks_.on_update(data);
             took = Clock::now() - start;
         });
         adapter.join();
@@ -185,17 +200,17 @@ public:
 
     GatewayRuntime& runtime() { return *runtime_; }
     PublishRecorder& recorder() { return recorder_; }
-    opcua::testing::MockOpcUaClient& opcua() { return *opcua_; }
+    acquisition::testing::MockAcquisitionSource& source() { return *source_; }
     output::testing::MockTelemetryPublisher& publisher() { return *publisher_; }
-    [[nodiscard]] const std::vector<opcua::MonitoredItem>& items() const { return items_; }
+    [[nodiscard]] const std::vector<acquisition::Item>& items() const { return items_; }
     [[nodiscard]] std::thread::id adapter_thread() const { return adapter_thread_; }
 
 private:
     PublishRecorder recorder_; // outlives the runtime (declared first)
-    opcua::testing::MockOpcUaClient* opcua_{nullptr};
+    acquisition::testing::MockAcquisitionSource* source_{nullptr};
     output::testing::MockTelemetryPublisher* publisher_{nullptr};
-    std::vector<opcua::MonitoredItem> items_;
-    opcua::ClientCallbacks opcua_callbacks_;
+    std::vector<acquisition::Item> items_;
+    acquisition::Callbacks source_callbacks_;
     output::PublisherStatusCallback publisher_callback_;
     std::thread::id adapter_thread_;
     std::unique_ptr<GatewayRuntime> runtime_;
@@ -233,35 +248,83 @@ private:
     return ::testing::AssertionSuccess();
 }
 
+::testing::AssertionResult same_diagnostics(const ItemDiagnostics& actual,
+                                            const ItemDiagnostics& expected)
+{
+    if (actual.asset != expected.asset || actual.tag != expected.tag ||
+        actual.source_id != expected.source_id || actual.locator != expected.locator ||
+        actual.no_value != expected.no_value ||
+        actual.last_no_value_status != expected.last_no_value_status) {
+        return ::testing::AssertionFailure() << "item diagnostics differ";
+    }
+    return ::testing::AssertionSuccess();
+}
+
 // ---- Startup ---------------------------------------------------------------------------------
 
-TEST(GatewayRuntime, StartsPublisherBeforeOpcUaWithConfiguredItems)
+TEST(GatewayRuntime, StartsPublisherBeforeSourceWithConfiguredItems)
 {
     RuntimeHarness harness;
     {
         const InSequence in_order;
         EXPECT_CALL(harness.publisher(), start(_));
-        EXPECT_CALL(harness.opcua(), start(_, _));
+        EXPECT_CALL(harness.source(), start(_, _));
     }
     harness.runtime().start();
     EXPECT_EQ(harness.items(),
-              (std::vector<opcua::MonitoredItem>{{0, "ns=2;s=Line01.Press01.Pressure"},
-                                                 {1, "ns=2;s=Line01.Press01.State"}}));
+              (std::vector<acquisition::Item>{{0, "ns=2;s=Line01.Press01.Pressure"},
+                                              {1, "ns=2;s=Line01.Press01.State"}}));
     EXPECT_THROW(harness.runtime().start(), std::logic_error);
 }
 
-TEST(GatewayRuntime, StartFailureUnwindsWhatWasStarted)
+TEST(GatewayRuntime, SourceStartFailureStopsTheSourceThenThePublisher)
 {
     RuntimeHarness harness;
-    EXPECT_CALL(harness.opcua(), start(_, _))
-        .WillOnce(
-            Invoke([](const std::vector<opcua::MonitoredItem>&, const opcua::ClientCallbacks&) {
-                throw std::runtime_error("cannot start OPC UA client");
-            }));
-    EXPECT_CALL(harness.publisher(), stop()).Times(::testing::AtLeast(1));
-    EXPECT_CALL(harness.opcua(), stop()).Times(0); // never started
+    EXPECT_CALL(harness.source(), start(_, _))
+        .WillOnce(Invoke([](const std::vector<acquisition::Item>&, const acquisition::Callbacks&) {
+            throw std::runtime_error("cannot start acquisition source");
+        }));
+    {
+        // A source may be partially started when start() throws; its stop() is required and
+        // safe, and it must run before the publisher is stopped (producers first).
+        const InSequence in_order;
+        EXPECT_CALL(harness.source(), stop()).Times(1);
+        EXPECT_CALL(harness.publisher(), stop()).Times(::testing::AtLeast(1));
+    }
     EXPECT_THROW(harness.runtime().start(), std::runtime_error);
     harness.runtime().stop(); // idempotent after the unwind
+}
+
+TEST(GatewayRuntime, PublisherStartFailureNeverStartsOrStopsTheSource)
+{
+    RuntimeHarness harness;
+    EXPECT_CALL(harness.publisher(), start(_))
+        .WillOnce(Invoke([](const output::PublisherStatusCallback&) {
+            throw std::runtime_error("cannot start publisher");
+        }));
+    EXPECT_CALL(harness.source(), start(_, _)).Times(0);
+    EXPECT_CALL(harness.source(), stop()).Times(0);
+    EXPECT_THROW(harness.runtime().start(), std::runtime_error);
+}
+
+bool construction_rejected(std::unique_ptr<acquisition::IAcquisitionSource> source)
+{
+    try {
+        const GatewayRuntime runtime{
+            test_config(), std::move(source),
+            std::make_unique<NiceMock<output::testing::MockTelemetryPublisher>>(),
+            RuntimeOptions{}};
+        return false;
+    } catch (const std::invalid_argument&) {
+        return true;
+    }
+}
+
+TEST(GatewayRuntime, RejectsMissingSourceOrSourceWithoutId)
+{
+    EXPECT_TRUE(construction_rejected(nullptr));
+    EXPECT_TRUE(construction_rejected(
+        std::make_unique<NiceMock<acquisition::testing::MockAcquisitionSource>>("")));
 }
 
 // ---- Data flow -------------------------------------------------------------------------------
@@ -309,12 +372,8 @@ TEST(GatewayRuntime, NoValueChangeIsCountedWithStatusAndNeverPublished)
     RuntimeHarness harness;
     harness.runtime().start();
     harness.publisher_state(output::PublisherState::Connected);
-    constexpr opcua::StatusCode kBadNodeIdUnknown = 0x80340000U;
-    harness.fire(opcua::DataChange{.id = 1,
-                                   .value = std::nullopt,
-                                   .quality = domain::DataQuality::Bad,
-                                   .status_code = kBadNodeIdUnknown,
-                                   .source_timestamp = std::nullopt});
+    constexpr acquisition::NativeStatusCode kBadNodeIdUnknown = 0x80340000U;
+    harness.fire(no_value(1, kBadNodeIdUnknown));
     harness.fire(change(0, 5.0)); // a later valued update still flows
     ASSERT_TRUE(harness.recorder().wait_for_count(1, 5s));
     std::this_thread::sleep_for(100ms);
@@ -324,9 +383,46 @@ TEST(GatewayRuntime, NoValueChangeIsCountedWithStatusAndNeverPublished)
     EXPECT_EQ(stats.no_value, 1U);
     const auto items = harness.runtime().item_diagnostics();
     ASSERT_EQ(items.size(), 2U);
-    EXPECT_EQ(items[1].no_value, 1U);
-    EXPECT_EQ(items[1].last_no_value_status, std::optional<opcua::StatusCode>{kBadNodeIdUnknown});
+    const ItemDiagnostics expected_state{.asset = "site01.line01.press01",
+                                         .tag = "state",
+                                         .source_id = kSourceId,
+                                         .locator = "ns=2;s=Line01.Press01.State",
+                                         .no_value = 1,
+                                         .last_no_value_status = kBadNodeIdUnknown};
+    EXPECT_TRUE(same_diagnostics(items[1], expected_state));
     EXPECT_EQ(items[0].no_value, 0U);
+    EXPECT_FALSE(items[0].last_no_value_status.has_value());
+}
+
+TEST(GatewayRuntime, NoValueWithoutNativeStatusIsCountedWithoutInventingOne)
+{
+    RuntimeHarness harness;
+    harness.runtime().start();
+    harness.fire(no_value(0, 0x80340000U));
+    harness.fire(no_value(0, std::nullopt)); // the most recent update carries no native status
+    const auto items = harness.runtime().item_diagnostics();
+    EXPECT_EQ(items[0].no_value, 2U);
+    EXPECT_FALSE(items[0].last_no_value_status.has_value());
+    EXPECT_EQ(harness.runtime().stats().no_value, 2U);
+}
+
+TEST(GatewayRuntime, UpdatesForAnotherSourceOrUnknownItemAreCountedAndDropped)
+{
+    RuntimeHarness harness;
+    harness.runtime().start();
+    harness.publisher_state(output::PublisherState::Connected);
+    auto foreign = change(0, 1.0);
+    foreign.source_id = "modbus-press01"; // (source_id, item_id) was never requested
+    harness.fire(foreign);
+    harness.fire(change(42, 1.0));
+    harness.fire(change(0, 2.0));
+    ASSERT_TRUE(harness.recorder().wait_for_count(1, 5s));
+    std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(harness.recorder().count(), 1U);
+    EXPECT_EQ(harness.recorder().points().front().value, domain::TelemetryValue{2.0});
+    const auto stats = harness.runtime().stats();
+    EXPECT_EQ(stats.unknown_item, 2U);
+    EXPECT_EQ(stats.received, 3U);
 }
 
 TEST(GatewayRuntime, DataCallbackNeverWaitsForPublish)
@@ -421,7 +517,7 @@ TEST(GatewayRuntime, ShutdownStopsProducersFirstThenDrainsThenStopsPublisher)
     std::size_t published_when_publisher_stopped = 0;
     {
         const InSequence in_order;
-        EXPECT_CALL(harness.opcua(), stop());
+        EXPECT_CALL(harness.source(), stop());
         EXPECT_CALL(harness.publisher(), stop()).WillOnce(Invoke([&] {
             published_when_publisher_stopped = harness.recorder().count();
             harness.recorder().release();
@@ -477,7 +573,7 @@ TEST(GatewayRuntime, StopIsIdempotentAndSafeBeforeStart)
     never_started.runtime().stop();
 
     RuntimeHarness harness;
-    EXPECT_CALL(harness.opcua(), stop()).Times(1);
+    EXPECT_CALL(harness.source(), stop()).Times(1);
     harness.runtime().start();
     harness.runtime().stop();
     harness.runtime().stop();

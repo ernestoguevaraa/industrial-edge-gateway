@@ -1,4 +1,4 @@
-# Architecture — MVP 1
+# Architecture — MVP 1 (with the MVP 2 acquisition API)
 
 ## 1. Scope
 
@@ -9,9 +9,13 @@ Python OPC UA Simulator
         |
         | OPC UA subscriptions
         v
-Open62541Client
+Open62541Client  (IOpcUaClient)
         |
-        | DataChange (protocol-neutral)
+        | opcua::DataChange (SDK-neutral, raw StatusCode)
+        v
+OpcUaSource      (IAcquisitionSource "opcua-main")
+        |
+        | acquisition::Update (protocol-neutral, native status)
         v
 Gateway Runtime  (mapping, edge timestamp, bounded queue)
         |
@@ -25,8 +29,11 @@ Mosquitto
 ```
 
 The architecture deliberately separates protocol-specific code from the internal telemetry model:
-the runtime depends only on the `IOpcUaClient` and `ITelemetryPublisher` interfaces, and no
-open62541 or Paho type appears in a public header.
+the runtime depends only on the protocol-neutral `IAcquisitionSource` and `ITelemetryPublisher`
+interfaces, and no open62541, OPC UA client or Paho type appears in its public header. The OPC UA
+client is wrapped by the `OpcUaSource` bridge, which `make_gateway_runtime()` builds; this is the
+first MVP 2 increment (common acquisition API) and prepares additional protocols such as Modbus
+TCP without changing the runtime again.
 
 ## 2. Components
 
@@ -80,7 +87,33 @@ monitored items. Reconnects use bounded exponential backoff (500 ms up to 30 s b
 Values that cannot be represented (arrays, unsupported types, non-finite floats) are reported as
 BAD without a value and logged.
 
-### 2.3 Domain Model
+### 2.3 Acquisition API and OPC UA bridge
+
+`ieg::acquisition` (`gateway/include/ieg/acquisition/`) is the SDK-neutral ingress shared by all
+protocol adapters:
+
+- `Item { id, locator }`: what the runtime requests. Item IDs are unique within a source; the
+  runtime keys items by `(source_id, item_id)`.
+- `Update { source_id, item_id, optional value, quality, optional source_timestamp,
+  optional native_status }`. `native_status` is the raw status in the protocol's own code space
+  (the OPC UA StatusCode, later e.g. a Modbus exception code). It is recorded and logged for
+  diagnostics but never interpreted; `quality` is the only protocol-independent quality.
+- `Status { source_id, state, detail }` with Connecting/Connected/Disconnected.
+- `IAcquisitionSource { id(), start(items, callbacks), stop() }`. Callbacks run serialized on
+  source-owned threads and must not block. `start()` is called at most once (an invalid request
+  does not consume it); `stop()` is idempotent, safe before `start()` and after a `start()` that
+  threw, and returns only once no callback can run.
+
+`OpcUaSource` adapts an `IOpcUaClient` to this contract. It forwards items as monitored items,
+copies value, quality and source timestamp unchanged, forwards the raw StatusCode as
+`native_status` (so `BadNodeIdUnknown` stays `0x80340000`, and a local conversion failure keeps the
+server's Good code while quality is Bad), and maps connection states one to one. Reconnection
+and callback quiescence are provided by `Open62541Client`. If the client's `start()` fails
+unexpectedly the bridge stops the client at once; a rejected request leaves it startable.
+
+The MVP 1 YAML schema configures exactly one OPC UA source, with source ID `opcua-main`.
+
+### 2.4 Domain Model
 
 Primary type:
 
@@ -113,24 +146,26 @@ UNCERTAIN
 BAD
 ```
 
-### 2.4 Gateway Core
+### 2.5 Gateway Core
 
 Implementation: `GatewayRuntime`.
 
 Responsibilities:
 
-- Own the lifecycle of the OPC UA client and the publisher
-- Receive normalized updates
+- Own the lifecycle of the acquisition source and the publisher
+- Receive normalized `acquisition::Update`s
 - Apply asset/tag/unit metadata from the configuration
 - Add the edge timestamp (taken when the update is received, before it is queued)
 - Forward telemetry to the publisher
 - Log failures and state transitions
 
-The OPC UA data callback only maps, timestamps and pushes into a bounded in-memory queue; it never
+The source data callback only maps, timestamps and pushes into a bounded in-memory queue; it never
 performs network I/O or logging. A single consumer thread takes points from the queue and
 publishes them. An update that carries no value is not turned into a `TelemetryPoint`; it is
-counted per item together with its most recent status code. Quality is never normalized:
-UNCERTAIN and BAD values are published as such.
+counted per item together with its most recent native status (`event=no_value_updates ...
+last_status=0x80340000`). Updates for a `(source_id, item_id)` the runtime never requested are
+counted as `unknown_item` and dropped. Quality is never normalized: UNCERTAIN and BAD values are
+published as such. `TelemetryPoint::protocol` comes from the item binding (`opcua`).
 
 The queue holds up to `runtime.queue_capacity` telemetry points (default 10000) and drops the
 oldest point when full. While the MQTT connection is down the consumer stops taking points, so
@@ -138,7 +173,7 @@ the queue provides best-effort, in-memory buffering of the most recent points du
 outages. It is not persistent store-and-forward: queued points are lost on restart and failed
 publishes are not retried in MVP 1.
 
-### 2.5 MQTT Publisher
+### 2.6 MQTT Publisher
 
 Implementation: `MqttPublisher` (Eclipse Paho MQTT C 1.3.16, MQTTAsync API) behind
 `ITelemetryPublisher`.
@@ -168,7 +203,7 @@ successful PUBACK; MQTT 5 PUBACK reason codes are mapped to retry dispositions (
 permanent). While disconnected, a publish returns immediately without being sent. The session
 uses clean start with session expiry 0; reconnects use bounded exponential backoff.
 
-### 2.6 Configuration
+### 2.7 Configuration
 
 Configuration is externalized in YAML (see `configs/gateway.example.yaml`).
 
@@ -209,8 +244,8 @@ loader accepts MQTT QoS 0–2; the MVP 1 runtime rejects anything other than QoS
 Implemented model:
 
 ```text
-OPC UA worker thread (open62541 client)
-        |  data callback: map + edge timestamp + try_push (no I/O)
+OPC UA worker thread (open62541 client -> OpcUaSource)
+        |  source callback: map + edge timestamp + try_push (no I/O)
         v
 bounded telemetry queue
         |
@@ -231,9 +266,11 @@ Rationale:
 
 No thread-per-tag design.
 
-Shutdown is bounded and ordered: stop the OPC UA client (producers) → close the queue → let the
-consumer drain until it finishes or the drain timeout passes (then the publisher is stopped to
-interrupt a blocked publish) → stop the publisher → join all threads.
+Shutdown is bounded and ordered: stop the acquisition source (producers; `OpcUaSource` stops the
+OPC UA client) → close the queue → let the consumer drain until it finishes or the drain timeout
+passes (then the publisher is stopped to interrupt a blocked publish) → stop the publisher → join
+all threads. Start runs in the reverse order (publisher and consumer before the source); if the
+source's `start()` throws, the source is still stopped before the publisher.
 
 ## 4. Error Handling
 
@@ -289,11 +326,15 @@ transitions and a periodic summary (delivered, dropped and failed counts, queue 
 - Topic construction and MQTT reason-code mapping
 - Configuration validation
 - Bounded queue, publisher and runtime behavior with mocks, including concurrency and shutdown
+- The acquisition contract on `OpcUaSource` (mapping, native status, lifecycle and start
+  failures), and the runtime wired to the real `OpcUaSource` over a mocked OPC UA client
 
 ### Integration tests
 
 - `Open62541Client` against the real Python simulator, including reconnect after a simulator
   restart
+- `OpcUaSource` over `Open62541Client` against the simulator: values, source timestamps, raw
+  StatusCodes (including `BadNodeIdUnknown`) and a final, silent `stop()`
 - `MqttPublisher` against a real Mosquitto broker, including broker restart, timeouts and
   shutdown while a publish is blocked
 
@@ -328,7 +369,7 @@ TLS, certificates and mTLS are planned for a later milestone.
 
 ```text
 MVP 1  OPC UA -> MQTT                      (v0.1.0, implemented)
-MVP 2  Modbus + common acquisition model
+MVP 2  Modbus + common acquisition model   (in progress: common acquisition API done)
 MVP 3  SQLite store-and-forward
 MVP 4  metrics / observability
 v1.0   ISA-95 asset modeling + failure scenarios

@@ -1,5 +1,6 @@
 #include "ieg/acquisition/opcua_source.hpp"
 
+#include <exception>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -20,6 +21,23 @@ ConnectionState map_state(opcua::ConnectionState state) noexcept
     return ConnectionState::Disconnected;
 }
 
+std::vector<opcua::MonitoredItem> to_monitored_items(const std::vector<Item>& items)
+{
+    if (items.empty()) {
+        throw std::invalid_argument("OpcUaSource requires at least one item");
+    }
+    std::unordered_set<ItemId> ids;
+    std::vector<opcua::MonitoredItem> monitored;
+    monitored.reserve(items.size());
+    for (const auto& item : items) {
+        if (item.locator.empty() || !ids.insert(item.id).second) {
+            throw std::invalid_argument("OpcUaSource received empty locator or duplicate item ID");
+        }
+        monitored.push_back(opcua::MonitoredItem{.id = item.id, .node_id = item.locator});
+    }
+    return monitored;
+}
+
 } // namespace
 
 OpcUaSource::OpcUaSource(std::string source_id, std::unique_ptr<opcua::IOpcUaClient> client)
@@ -37,24 +55,17 @@ OpcUaSource::~OpcUaSource()
 
 void OpcUaSource::start(std::vector<Item> items, Callbacks callbacks)
 {
-    if (started_) {
-        throw std::logic_error("OpcUaSource already started");
+    const std::lock_guard lock(lifecycle_mutex_);
+    if (phase_ != Phase::Idle) {
+        throw std::logic_error("OpcUaSource::start() called after start() or stop()");
     }
-    if (items.empty() || !callbacks.on_update || !callbacks.on_status) {
-        throw std::invalid_argument("OpcUaSource requires items and both callbacks");
+    if (!callbacks.on_update || !callbacks.on_status) {
+        throw std::invalid_argument("OpcUaSource requires both callbacks");
     }
+    auto monitored = to_monitored_items(items);
 
-    std::unordered_set<ItemId> ids;
-    std::vector<opcua::MonitoredItem> monitored;
-    monitored.reserve(items.size());
-    for (const auto& item : items) {
-        if (item.locator.empty() || !ids.insert(item.id).second) {
-            throw std::invalid_argument("OpcUaSource received empty locator or duplicate item ID");
-        }
-        monitored.push_back(opcua::MonitoredItem{.id = item.id, .node_id = item.locator});
-    }
-
-    // Capture by value: the underlying client retains callbacks beyond this stack frame.
+    // Capture by value: the client retains the callbacks beyond this stack frame. The status code
+    // is forwarded as an integer, so no conversion (or allocation) happens in the data path.
     opcua::ClientCallbacks forwarded{
         .on_data_change =
             [source_id = source_id_,
@@ -64,7 +75,7 @@ void OpcUaSource::start(std::vector<Item> items, Callbacks callbacks)
                           .value = data.value,
                           .quality = data.quality,
                           .source_timestamp = data.source_timestamp,
-                          .diagnostic = std::to_string(data.status_code)});
+                          .native_status = data.status_code});
             },
         .on_status_change =
             [source_id = source_id_,
@@ -74,14 +85,31 @@ void OpcUaSource::start(std::vector<Item> items, Callbacks callbacks)
                           .detail = status.detail});
             },
     };
-    // The existing client owns reconnection and guarantees stop() callback quiescence.
-    client_->start(std::move(monitored), std::move(forwarded));
-    started_ = true;
+    try {
+        client_->start(std::move(monitored), std::move(forwarded));
+    } catch (const std::invalid_argument&) {
+        throw; // rejected request (e.g. unparsable NodeId): the client did not start
+    } catch (...) {
+        // Unexpected failure: the client may be partially started. Release it now so no
+        // callback can run after start() has thrown; the single start is consumed.
+        phase_ = Phase::Stopped;
+        client_->stop();
+        throw;
+    }
+    phase_ = Phase::Started;
 }
 
 void OpcUaSource::stop() noexcept
 {
-    client_->stop();
+    try {
+        const std::lock_guard lock(lifecycle_mutex_);
+        phase_ = Phase::Stopped;
+        // Idempotent and safe before start(); returns only once no callback can run.
+        client_->stop();
+    } catch (...) {
+        // Only reachable if locking itself fails; nothing safe is left to do.
+        std::terminate();
+    }
 }
 
 } // namespace ieg::acquisition

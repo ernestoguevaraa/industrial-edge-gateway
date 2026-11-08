@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — MVP 2 (in progress)
+
+### Changed
+
+- `GatewayRuntime` consumes the SDK-neutral `ieg::acquisition::IAcquisitionSource` instead of
+  `IOpcUaClient`; `make_gateway_runtime()` wraps `Open62541Client` in the new `OpcUaSource`
+  bridge. YAML configuration, MQTT topics and payloads, quality, timestamps, queueing and
+  shutdown behavior are unchanged.
+- `acquisition::Update` carries the raw protocol status as `native_status` (an integer) instead
+  of a decimal string; `ItemDiagnostics` reports `source_id`, `locator` and a protocol-neutral
+  `last_no_value_status`.
+- The `event=started` log line also reports `source_id`.
+
 ## v0.1.0 — MVP 1: OPC UA → MQTT vertical slice
 
 First release of the Industrial Edge Gateway: a C++20 gateway that subscribes to OPC UA data,

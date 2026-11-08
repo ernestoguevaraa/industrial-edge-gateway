@@ -21,6 +21,7 @@ add_executable(
   output/publish_result_test.cpp
   output/telemetry_publisher_mock_test.cpp
   runtime/gateway_runtime_test.cpp
+  runtime/opcua_source_runtime_test.cpp
   runtime/telemetry_mapping_test.cpp)
 # The adapter's private headers (gateway/src) are visible to its unit tests only.
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/gateway/src)
@@ -49,11 +50,13 @@ gtest_discover_tests(gateway_tests)
 #  - IEG_SIMULATOR_PYTHON: interpreter with simulator/requirements.txt (OPC UA simulator)
 #  - IEG_MOSQUITTO: mosquitto broker binary (MQTT publisher)
 #  - both: end-to-end test of the gateway executable
-add_executable(gateway_integration_tests integration/gateway_end_to_end_test.cpp integration/mqtt_mosquitto_test.cpp
-                                         integration/open62541_simulator_test.cpp)
+add_executable(
+  gateway_integration_tests integration/gateway_end_to_end_test.cpp integration/mqtt_mosquitto_test.cpp
+                            integration/open62541_simulator_test.cpp integration/opcua_source_simulator_test.cpp)
 target_include_directories(gateway_integration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(gateway_integration_tests PRIVATE gateway_domain gateway_mqtt gateway_opcua_open62541
-                                                        eclipse-paho-mqtt-c::paho-mqtt3a-static GTest::gtest_main)
+target_link_libraries(
+  gateway_integration_tests PRIVATE gateway_acquisition_opcua gateway_domain gateway_mqtt gateway_opcua_open62541
+                                    eclipse-paho-mqtt-c::paho-mqtt3a-static GTest::gtest_main)
 target_compile_definitions(gateway_integration_tests PRIVATE IEG_SIMULATOR_DIR="${PROJECT_SOURCE_DIR}/simulator"
                                                              IEG_GATEWAY_BINARY="$<TARGET_FILE:gateway>")
 # The end-to-end test runs the real gateway executable.

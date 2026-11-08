@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace ieg::runtime {
 namespace {
@@ -45,17 +46,18 @@ TEST(ItemTable, AssignsIdsInConfigurationOrder)
 {
     const ItemTable table{two_asset_config()};
     ASSERT_EQ(table.size(), 3U);
-    const auto& items = table.monitored_items();
-    ASSERT_EQ(items.size(), 3U);
-    EXPECT_EQ(items[0], (opcua::MonitoredItem{0, "ns=2;s=Line01.Press01.Pressure"}));
-    EXPECT_EQ(items[1], (opcua::MonitoredItem{1, "ns=2;s=Line01.Press01.State"}));
-    EXPECT_EQ(items[2], (opcua::MonitoredItem{2, "ns=2;s=Line01.Oven01.Temperature"}));
+    const std::vector<acquisition::Item> expected{{0, "ns=2;s=Line01.Press01.Pressure"},
+                                                  {1, "ns=2;s=Line01.Press01.State"},
+                                                  {2, "ns=2;s=Line01.Oven01.Temperature"}};
+    EXPECT_EQ(table.items(), expected);
 
     const auto* oven = table.find(2);
     ASSERT_NE(oven, nullptr);
     EXPECT_EQ(oven->asset, "site01.line01.oven01");
     EXPECT_EQ(oven->tag, "temperature");
     EXPECT_EQ(oven->unit, "degC");
+    EXPECT_EQ(oven->locator, "ns=2;s=Line01.Oven01.Temperature");
+    EXPECT_EQ(oven->protocol, "opcua");
     EXPECT_EQ(table.find(3), nullptr);
 }
 
@@ -71,11 +73,12 @@ TEST(ItemTable, RejectsConfigurationWithoutNodes)
 TEST(MakePoint, MapsValueMetadataAndTimestamps)
 {
     const ItemTable table{two_asset_config()};
-    const opcua::DataChange change{.id = 0,
-                                   .value = 180.5,
-                                   .quality = domain::DataQuality::Good,
-                                   .status_code = 0,
-                                   .source_timestamp = kSourceTime};
+    const acquisition::Update change{.source_id = "opcua-main",
+                                     .item_id = 0,
+                                     .value = 180.5,
+                                     .quality = domain::DataQuality::Good,
+                                     .source_timestamp = kSourceTime,
+                                     .native_status = 0};
     const auto point = make_point(*table.find(0), change, kEdgeTime);
     const std::optional<domain::TelemetryPoint> expected{
         domain::TelemetryPoint{.asset = "site01.line01.press01",
@@ -93,11 +96,12 @@ TEST(MakePoint, KeepsUncertainAndBadQualityVisible)
 {
     const ItemTable table{two_asset_config()};
     for (const auto quality : {domain::DataQuality::Uncertain, domain::DataQuality::Bad}) {
-        const opcua::DataChange change{.id = 2,
-                                       .value = 851.0,
-                                       .quality = quality,
-                                       .status_code = 0x808C0000U,
-                                       .source_timestamp = kSourceTime};
+        const acquisition::Update change{.source_id = "opcua-main",
+                                         .item_id = 2,
+                                         .value = 851.0,
+                                         .quality = quality,
+                                         .source_timestamp = kSourceTime,
+                                         .native_status = 0x808C0000U};
         const auto point = make_point(*table.find(2), change, kEdgeTime);
         EXPECT_TRUE(point.has_value() && point->quality == quality);
     }
@@ -106,11 +110,12 @@ TEST(MakePoint, KeepsUncertainAndBadQualityVisible)
 TEST(MakePoint, AbsentSourceTimestampStaysAbsent)
 {
     const ItemTable table{two_asset_config()};
-    const opcua::DataChange change{.id = 1,
-                                   .value = std::string{"RUNNING"},
-                                   .quality = domain::DataQuality::Good,
-                                   .status_code = 0,
-                                   .source_timestamp = std::nullopt};
+    const acquisition::Update change{.source_id = "opcua-main",
+                                     .item_id = 1,
+                                     .value = std::string{"RUNNING"},
+                                     .quality = domain::DataQuality::Good,
+                                     .source_timestamp = std::nullopt,
+                                     .native_status = 0};
     const auto point = make_point(*table.find(1), change, kEdgeTime);
     EXPECT_TRUE(point.has_value() && !point->source_timestamp.has_value() &&
                 point->edge_timestamp == kEdgeTime);
@@ -119,11 +124,12 @@ TEST(MakePoint, AbsentSourceTimestampStaysAbsent)
 TEST(MakePoint, NoValueNeverBecomesATelemetryPoint)
 {
     const ItemTable table{two_asset_config()};
-    const opcua::DataChange change{.id = 0,
-                                   .value = std::nullopt,
-                                   .quality = domain::DataQuality::Bad,
-                                   .status_code = 0x80340000U,
-                                   .source_timestamp = std::nullopt};
+    const acquisition::Update change{.source_id = "opcua-main",
+                                     .item_id = 0,
+                                     .value = std::nullopt,
+                                     .quality = domain::DataQuality::Bad,
+                                     .source_timestamp = std::nullopt,
+                                     .native_status = 0x80340000U};
     EXPECT_FALSE(make_point(*table.find(0), change, kEdgeTime).has_value());
 }
 

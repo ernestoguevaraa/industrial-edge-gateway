@@ -22,8 +22,9 @@
 #include <vector>
 
 // Threads:
-//  - adapter threads (OPC UA worker, publisher worker) invoke the callbacks below. Callbacks only
-//    map/timestamp/try_push (data) or update state and notify (status); they never log or block.
+//  - adapter threads (acquisition source worker, publisher worker) invoke the callbacks below.
+//    Callbacks only map/timestamp/try_push (data) or update state and notify (status); they
+//    never log or block.
 //  - consumer thread: the only caller of publish(). Waits while the publisher is not connected.
 //  - monitor thread: logs connection transitions and periodic summaries outside the callbacks.
 
@@ -53,22 +54,25 @@ spdlog::logger& logger()
     return *instance;
 }
 
-std::string hex_status(opcua::StatusCode code)
+std::string hex_status(const std::optional<acquisition::NativeStatusCode>& code)
 {
+    if (!code) {
+        return "none";
+    }
     std::array<char, 16> buffer{};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): fixed format, bounded buffer.
-    static_cast<void>(std::snprintf(buffer.data(), buffer.size(), "0x%08X", code));
+    static_cast<void>(std::snprintf(buffer.data(), buffer.size(), "0x%08X", *code));
     return buffer.data();
 }
 
-const char* to_string(opcua::ConnectionState state) noexcept
+const char* to_string(acquisition::ConnectionState state) noexcept
 {
     switch (state) {
-    case opcua::ConnectionState::Connecting:
+    case acquisition::ConnectionState::Connecting:
         return "Connecting";
-    case opcua::ConnectionState::Connected:
+    case acquisition::ConnectionState::Connected:
         return "Connected";
-    case opcua::ConnectionState::Disconnected:
+    case acquisition::ConnectionState::Disconnected:
         return "Disconnected";
     }
     return "Unknown";
@@ -102,15 +106,21 @@ void bump(std::atomic<std::uint64_t>& counter, std::uint64_t n = 1) noexcept
 class GatewayRuntime::Impl
 {
 public:
-    Impl(const config::GatewayConfig& config, std::unique_ptr<opcua::IOpcUaClient> opcua,
+    Impl(const config::GatewayConfig& config,
+         std::unique_ptr<acquisition::IAcquisitionSource> source,
          std::unique_ptr<output::ITelemetryPublisher> publisher, RuntimeOptions options)
         : table_(config), options_(options), queue_(options.queue_capacity),
-          opcua_(std::move(opcua)), publisher_(std::move(publisher)), item_counters_(table_.size()),
-          endpoint_(config.opcua.endpoint),
+          source_(std::move(source)), publisher_(std::move(publisher)),
+          item_counters_(table_.size()), endpoint_(config.opcua.endpoint),
           broker_(config.mqtt.host + ":" + std::to_string(config.mqtt.port))
     {
-        if (!opcua_ || !publisher_) {
-            throw std::invalid_argument("GatewayRuntime needs an OPC UA client and a publisher");
+        if (!source_ || !publisher_) {
+            throw std::invalid_argument(
+                "GatewayRuntime needs an acquisition source and a publisher");
+        }
+        source_id_ = source_->id();
+        if (source_id_.empty()) {
+            throw std::invalid_argument("GatewayRuntime needs a non-empty acquisition source ID");
         }
         if (options_.drain_timeout <= std::chrono::milliseconds::zero() ||
             options_.report_interval <= std::chrono::milliseconds::zero()) {
@@ -137,21 +147,21 @@ public:
             publisher_->start([this](const output::PublisherStatus& s) { on_publisher_status(s); });
             publisher_started_ = true;
             consumer_ = std::thread([this] { consume(); });
-            opcua_->start(table_.monitored_items(),
-                          opcua::ClientCallbacks{
-                              .on_data_change = [this](const opcua::DataChange& c) { on_data(c); },
-                              .on_status_change =
-                                  [this](const opcua::ConnectionStatus& s) { on_opcua_status(s); },
-                          });
-            opcua_started_ = true;
+            // From here on the source must be stopped on any unwind, even if start() throws.
+            source_start_attempted_ = true;
+            source_->start(table_.items(),
+                           acquisition::Callbacks{
+                               .on_update = [this](const acquisition::Update& u) { on_update(u); },
+                               .on_status = [this](const acquisition::Status& s) { on_status(s); },
+                           });
         } catch (const std::exception& error) {
             logger().critical("event=start_failed error=\"{}\"", error.what());
             shutdown_locked();
             throw;
         }
-        logger().info("event=started opcua_endpoint={} mqtt_broker={} items={} "
+        logger().info("event=started source_id={} opcua_endpoint={} mqtt_broker={} items={} "
                       "queue_capacity_points={} drain_timeout_ms={}",
-                      endpoint_, broker_, table_.size(), options_.queue_capacity,
+                      source_id_, endpoint_, broker_, table_.size(), options_.queue_capacity,
                       options_.drain_timeout.count());
     }
 
@@ -189,18 +199,15 @@ public:
     {
         std::vector<ItemDiagnostics> result;
         result.reserve(table_.size());
-        for (opcua::ItemId id = 0; id < table_.size(); ++id) {
+        for (acquisition::ItemId id = 0; id < table_.size(); ++id) {
             const auto& binding = *table_.find(id);
             const auto& counters = item_counters_[id];
-            ItemDiagnostics item{.asset = binding.asset,
-                                 .tag = binding.tag,
-                                 .node_id = binding.node_id,
-                                 .no_value = load(counters.no_value),
-                                 .last_no_value_status = std::nullopt};
-            if (counters.has_status.load()) {
-                item.last_no_value_status = counters.last_status.load();
-            }
-            result.push_back(std::move(item));
+            result.push_back(ItemDiagnostics{.asset = binding.asset,
+                                             .tag = binding.tag,
+                                             .source_id = source_id_,
+                                             .locator = binding.locator,
+                                             .no_value = load(counters.no_value),
+                                             .last_no_value_status = counters.last_status()});
         }
         return result;
     }
@@ -208,10 +215,27 @@ public:
 private:
     struct ItemCounters
     {
+        // Bit 32 marks "status present", so one atomic holds the optional native status.
+        static constexpr std::uint64_t kHasStatus = std::uint64_t{1} << 32U;
+
         std::atomic<std::uint64_t> no_value{0};
-        std::atomic<opcua::StatusCode> last_status{0};
-        std::atomic<bool> has_status{false};
+        std::atomic<std::uint64_t> last_status_word{0};
         std::uint64_t reported{0}; // monitor thread only
+
+        void record(const std::optional<acquisition::NativeStatusCode>& status) noexcept
+        {
+            last_status_word.store(status ? (kHasStatus | *status) : 0U, std::memory_order_relaxed);
+            bump(no_value);
+        }
+
+        [[nodiscard]] std::optional<acquisition::NativeStatusCode> last_status() const noexcept
+        {
+            const auto word = last_status_word.load(std::memory_order_relaxed);
+            if ((word & kHasStatus) == 0U) {
+                return std::nullopt;
+            }
+            return static_cast<acquisition::NativeStatusCode>(word & ~kHasStatus);
+        }
     };
 
     struct StatusEvent
@@ -224,27 +248,25 @@ private:
 
     struct LoggedEvents
     {
-        StatusEvent opcua;
+        StatusEvent source;
         StatusEvent publisher;
     };
 
     // ---- Adapter callbacks: short and non-blocking, no logging ------------------------------
 
-    void on_data(const opcua::DataChange& change)
+    void on_update(const acquisition::Update& update)
     {
         const auto edge_timestamp = detail::receipt_time(); // gateway receipt time, before enqueue
         bump(received_);
-        const detail::ItemBinding* binding = table_.find(change.id);
+        const detail::ItemBinding* binding =
+            update.source_id == source_id_ ? table_.find(update.item_id) : nullptr;
         if (binding == nullptr) {
             bump(unknown_item_);
             return;
         }
-        auto point = detail::make_point(*binding, change, edge_timestamp);
+        auto point = detail::make_point(*binding, update, edge_timestamp);
         if (!point) {
-            auto& counters = item_counters_[change.id];
-            counters.last_status.store(change.status_code);
-            counters.has_status.store(true);
-            bump(counters.no_value);
+            item_counters_[update.item_id].record(update.native_status);
             bump(no_value_);
             return;
         }
@@ -261,11 +283,11 @@ private:
         }
     }
 
-    void on_opcua_status(const opcua::ConnectionStatus& status)
+    void on_status(const acquisition::Status& status)
     {
         {
             const std::lock_guard lock(state_mutex_);
-            record_event_locked(opcua_event_, to_string(status.state), status.detail);
+            record_event_locked(source_event_, to_string(status.state), status.detail);
         }
         state_cv_.notify_all();
     }
@@ -405,13 +427,14 @@ private:
             std::unique_lock lock(state_mutex_);
             while (true) {
                 state_cv_.wait_until(lock, next_report, [this] {
-                    return monitor_stop_ || opcua_event_.pending || publisher_event_.pending;
+                    return monitor_stop_ || source_event_.pending || publisher_event_.pending;
                 });
-                const LoggedEvents events{std::exchange(opcua_event_, StatusEvent{}),
+                const LoggedEvents events{std::exchange(source_event_, StatusEvent{}),
                                           std::exchange(publisher_event_, StatusEvent{})};
                 const bool stop = monitor_stop_;
                 lock.unlock();
-                log_status("opcua", endpoint_, events.opcua);
+                // The MVP 1 configuration has exactly one OPC UA source; keep its log identity.
+                log_status("opcua", endpoint_, events.source);
                 log_status("mqtt", broker_, events.publisher);
                 if (Clock::now() >= next_report || stop) {
                     log_summary(last_report);
@@ -461,7 +484,7 @@ private:
                      now.delivered - last.delivered, now.enqueued - last.enqueued,
                      now.queue_dropped - last.queue_dropped, now.no_value - last.no_value,
                      failed(now) - failed(last), now.queue.size, now.queue.high_watermark);
-        for (opcua::ItemId id = 0; id < table_.size(); ++id) {
+        for (acquisition::ItemId id = 0; id < table_.size(); ++id) {
             auto& counters = item_counters_[id];
             const auto total = load(counters.no_value);
             if (total == counters.reported) {
@@ -470,8 +493,8 @@ private:
             const auto& binding = *table_.find(id);
             logger().warn("event=no_value_updates asset={} tag={} node_id={} count={} "
                           "last_status={}",
-                          binding.asset, binding.tag, binding.node_id, total - counters.reported,
-                          hex_status(counters.last_status.load()));
+                          binding.asset, binding.tag, binding.locator, total - counters.reported,
+                          hex_status(counters.last_status()));
             counters.reported = total;
         }
         last = now;
@@ -487,9 +510,10 @@ private:
         stopped_ = true;
         logger().info("event=stopping");
 
-        // 1. Stop producers: after this no data callback runs.
-        if (opcua_started_) {
-            opcua_->stop();
+        // 1. Stop producers: after this no source callback runs. stop() is also required (and
+        //    safe) after a start() that threw, since a source may have partially started.
+        if (source_start_attempted_) {
+            source_->stop();
         }
         // 2. Close the queue and let the consumer drain what is left.
         queue_.close();
@@ -542,11 +566,12 @@ private:
     const detail::ItemTable table_;
     const RuntimeOptions options_;
     core::TelemetryQueue queue_;
-    std::unique_ptr<opcua::IOpcUaClient> opcua_;
+    std::unique_ptr<acquisition::IAcquisitionSource> source_;
     std::unique_ptr<output::ITelemetryPublisher> publisher_;
     std::vector<ItemCounters> item_counters_;
     const std::string endpoint_;
     const std::string broker_;
+    std::string source_id_; // set in the constructor, immutable afterwards
 
     std::atomic<std::uint64_t> received_{0};
     std::atomic<std::uint64_t> enqueued_{0};
@@ -569,7 +594,7 @@ private:
     bool publisher_connected_{false};
     bool draining_{false};
     bool monitor_stop_{false};
-    StatusEvent opcua_event_;
+    StatusEvent source_event_;
     StatusEvent publisher_event_;
 
     // Owner thread.
@@ -577,7 +602,7 @@ private:
     bool start_attempted_{false};
     bool stopped_{false};
     bool publisher_started_{false};
-    bool opcua_started_{false};
+    bool source_start_attempted_{false};
     std::promise<void> consumer_done_;
     std::future<void> consumer_done_future_{consumer_done_.get_future()};
     std::thread consumer_;
@@ -585,10 +610,10 @@ private:
 };
 
 GatewayRuntime::GatewayRuntime(const config::GatewayConfig& config,
-                               std::unique_ptr<opcua::IOpcUaClient> opcua,
+                               std::unique_ptr<acquisition::IAcquisitionSource> source,
                                std::unique_ptr<output::ITelemetryPublisher> publisher,
                                RuntimeOptions options)
-    : impl_(std::make_unique<Impl>(config, std::move(opcua), std::move(publisher), options))
+    : impl_(std::make_unique<Impl>(config, std::move(source), std::move(publisher), options))
 {}
 
 GatewayRuntime::~GatewayRuntime() = default;

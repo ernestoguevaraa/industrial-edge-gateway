@@ -49,14 +49,16 @@ add_library(gateway_core INTERFACE)
 target_include_directories(gateway_core INTERFACE include)
 target_link_libraries(gateway_core INTERFACE gateway_domain)
 
-# Gateway runtime: wires configuration, the OPC UA adapter, the queue and the MQTT publisher.
+# Gateway runtime: wires configuration, the acquisition source, the queue and the MQTT publisher.
+# Its public interface is SDK- and protocol-neutral; the OPC UA source and client are private
+# wiring of make_gateway_runtime().
 add_library(gateway_runtime STATIC src/runtime/gateway_runtime.cpp src/runtime/runtime_factory.cpp
                                    src/runtime/telemetry_mapping.cpp)
 target_include_directories(gateway_runtime PRIVATE src)
 target_link_libraries(
   gateway_runtime
-  PUBLIC gateway_config gateway_core gateway_opcua_api gateway_output_api
-  PRIVATE gateway_mqtt gateway_opcua_open62541 spdlog::spdlog)
+  PUBLIC gateway_config gateway_core gateway_acquisition_api gateway_output_api
+  PRIVATE gateway_acquisition_opcua gateway_mqtt gateway_opcua_open62541 spdlog::spdlog)
 gateway_set_warnings(gateway_runtime)
 
 add_executable(gateway src/main.cpp)

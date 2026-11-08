@@ -1,11 +1,11 @@
 # MVP 2 — Modbus TCP acquisition design
 
-Status: Proposed (implementation not started)  
+Status: In progress — increment 1 (common ingress model, OPC UA bridge, runtime migration) implemented; Modbus not started\
 Tracking: [Issue #1](https://github.com/ernestoguevaraa/industrial-edge-gateway/issues/1)
 
 ## Motivation
 
-MVP 1 already has a protocol-independent `TelemetryPoint` and MQTT pipeline, but `GatewayRuntime` depends directly on `IOpcUaClient`, `opcua::DataChange`, OPC UA item identifiers and OPC UA mapping. Adding Modbus directly to that runtime would couple ingestion and orchestration to individual SDKs. Refactor the ingress contract before implementing Modbus.
+MVP 1 had a protocol-independent `TelemetryPoint` and MQTT pipeline, but `GatewayRuntime` depended directly on `IOpcUaClient`, `opcua::DataChange`, OPC UA item identifiers and OPC UA mapping. Increment 1 removed that dependency (see "Implemented contract" below). Adding Modbus directly to that runtime would couple ingestion and orchestration to individual SDKs. Refactor the ingress contract before implementing Modbus.
 
 ## Target pipeline
 
@@ -27,6 +27,22 @@ Introduce an SDK-neutral `ieg::acquisition` API (names may be adjusted during im
 - `IAcquisitionSource`: `start(callbacks)`, `stop() noexcept`; callbacks have serialized/non-blocking lifetime semantics documented by the API. If an adapter manages multiple devices, status is separately keyed by device/source identity.
 
 Build an OPC UA acquisition bridge that preserves existing subscriptions, values, timestamps, quality, reconnection, and no-value diagnostics. Keep adapter SDK types out of common headers. Ensure shutdown stops **all** acquisition producers before closing the queue.
+
+## Implemented contract (increment 1)
+
+`gateway/include/ieg/acquisition/acquisition_source.hpp` implements the proposal above with these
+decisions:
+- `Update::native_status` (`std::optional<std::uint32_t>`) carries the raw protocol status
+  (OPC UA StatusCode; a Modbus exception code later) instead of a string, so no parsing is needed
+  and the runtime keeps reporting it as `last_status=0x...`. It is opaque to the runtime.
+- `IAcquisitionSource::id()` exposes the source ID; the runtime accepts updates only for the
+  `(source_id, item_id)` pairs it requested.
+- `stop()` is idempotent, safe before `start()` and after a failed `start()`; the runtime always
+  stops the source before the publisher, including when the source's `start()` threw.
+- `OpcUaSource` (source ID `opcua-main`) wraps `Open62541Client`; `make_gateway_runtime()` builds it.
+  The MVP 1 YAML, MQTT topics and payloads are unchanged.
+
+The runtime still owns exactly one source; the multi-source lifecycle is increment 4.
 
 ## Configuration
 

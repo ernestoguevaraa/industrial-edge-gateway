@@ -1,6 +1,8 @@
+#include "ieg/acquisition/opcua_source.hpp"
 #include "ieg/mqtt/mqtt_publisher.hpp"
 #include "ieg/opcua/open62541_client.hpp"
 #include "ieg/runtime/gateway_runtime.hpp"
+#include "runtime/telemetry_mapping.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -39,15 +41,19 @@ std::unique_ptr<GatewayRuntime> make_gateway_runtime(const config::GatewayConfig
                      "across container recreation\"");
     }
     try {
-        auto opcua = std::make_unique<opcua::Open62541Client>(opcua::Open62541ClientOptions{
-            .endpoint = config.opcua.endpoint,
-            .publishing_interval = config.opcua.subscription_interval});
+        // The OPC UA client is owned by its acquisition source; the runtime only sees the
+        // SDK-neutral IAcquisitionSource.
+        auto source = std::make_unique<acquisition::OpcUaSource>(
+            std::string{detail::kOpcUaSourceId},
+            std::make_unique<opcua::Open62541Client>(opcua::Open62541ClientOptions{
+                .endpoint = config.opcua.endpoint,
+                .publishing_interval = config.opcua.subscription_interval}));
         auto publisher = std::make_unique<mqtt::MqttPublisher>(
             mqtt::MqttPublisherOptions{.host = config.mqtt.host,
                                        .port = config.mqtt.port,
                                        .topic_prefix = config.mqtt.topic_prefix,
                                        .client_id = config.mqtt.client_id});
-        return std::make_unique<GatewayRuntime>(config, std::move(opcua), std::move(publisher),
+        return std::make_unique<GatewayRuntime>(config, std::move(source), std::move(publisher),
                                                 runtime_options_from(config));
     } catch (const std::invalid_argument& error) {
         throw StartupError(std::string{"invalid gateway configuration: "} + error.what());

@@ -10,13 +10,16 @@ ItemTable::ItemTable(const config::GatewayConfig& config)
 {
     for (const auto& asset : config.assets) {
         for (const auto& node : asset.nodes) {
-            if (bindings_.size() >= std::numeric_limits<opcua::ItemId>::max()) {
+            if (bindings_.size() >= std::numeric_limits<acquisition::ItemId>::max()) {
                 throw std::invalid_argument("too many configured nodes");
             }
-            const auto id = static_cast<opcua::ItemId>(bindings_.size());
-            bindings_.push_back(ItemBinding{
-                .asset = asset.asset, .tag = node.tag, .unit = node.unit, .node_id = node.node_id});
-            items_.push_back(opcua::MonitoredItem{.id = id, .node_id = node.node_id});
+            const auto id = static_cast<acquisition::ItemId>(bindings_.size());
+            bindings_.push_back(ItemBinding{.asset = asset.asset,
+                                            .tag = node.tag,
+                                            .unit = node.unit,
+                                            .locator = node.node_id,
+                                            .protocol = std::string{kOpcUaProtocol}});
+            items_.push_back(acquisition::Item{.id = id, .locator = node.node_id});
         }
     }
     if (bindings_.empty()) {
@@ -30,20 +33,20 @@ domain::Timestamp receipt_time() noexcept
 }
 
 std::optional<domain::TelemetryPoint> make_point(const ItemBinding& binding,
-                                                 const opcua::DataChange& change,
+                                                 const acquisition::Update& update,
                                                  domain::Timestamp edge_timestamp)
 {
-    if (!change.value) {
+    if (!update.value) {
         return std::nullopt;
     }
     return domain::TelemetryPoint{.asset = binding.asset,
                                   .tag = binding.tag,
-                                  .value = *change.value,
+                                  .value = *update.value,
                                   .unit = binding.unit,
-                                  .quality = change.quality,
-                                  .source_timestamp = change.source_timestamp,
+                                  .quality = update.quality,
+                                  .source_timestamp = update.source_timestamp,
                                   .edge_timestamp = edge_timestamp,
-                                  .protocol = std::string{kOpcUaProtocol}};
+                                  .protocol = binding.protocol};
 }
 
 } // namespace ieg::runtime::detail

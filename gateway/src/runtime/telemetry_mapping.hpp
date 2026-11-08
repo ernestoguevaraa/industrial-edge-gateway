@@ -1,8 +1,8 @@
 #pragma once
 
+#include "ieg/acquisition/acquisition_source.hpp"
 #include "ieg/config/gateway_config.hpp"
 #include "ieg/domain/telemetry.hpp"
-#include "ieg/opcua/opcua_client.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -12,14 +12,19 @@
 
 namespace ieg::runtime::detail {
 
+// Normalized protocol identifier published in TelemetryPoint::protocol for OPC UA items.
 inline constexpr std::string_view kOpcUaProtocol = "opcua";
+// Source ID of the single OPC UA source configured by the MVP 1 YAML schema.
+inline constexpr std::string_view kOpcUaSourceId = "opcua-main";
 
 struct ItemBinding
 {
     std::string asset;
     std::string tag;
     std::string unit;
-    std::string node_id;
+    // Adapter-native locator (the OPC UA NodeId for configured OPC UA nodes).
+    std::string locator;
+    std::string protocol;
 };
 
 // Immutable after construction, so lookups need no locking. ItemId == index in configuration
@@ -30,11 +35,8 @@ public:
     // Throws std::invalid_argument if the configuration has no nodes.
     explicit ItemTable(const config::GatewayConfig& config);
 
-    [[nodiscard]] const std::vector<opcua::MonitoredItem>& monitored_items() const noexcept
-    {
-        return items_;
-    }
-    [[nodiscard]] const ItemBinding* find(opcua::ItemId id) const noexcept
+    [[nodiscard]] const std::vector<acquisition::Item>& items() const noexcept { return items_; }
+    [[nodiscard]] const ItemBinding* find(acquisition::ItemId id) const noexcept
     {
         return id < bindings_.size() ? &bindings_[id] : nullptr;
     }
@@ -42,17 +44,17 @@ public:
 
 private:
     std::vector<ItemBinding> bindings_;
-    std::vector<opcua::MonitoredItem> items_;
+    std::vector<acquisition::Item> items_;
 };
 
 // Gateway receipt time with the domain Timestamp resolution.
 [[nodiscard]] domain::Timestamp receipt_time() noexcept;
 
-// nullopt if the DataChange carries no value (it must not become an invalid TelemetryPoint).
+// nullopt if the update carries no value (it must not become an invalid TelemetryPoint).
 // Otherwise value, quality and source timestamp are taken as delivered (quality is never
-// normalized) and edge_timestamp is the given receipt time.
+// normalized), protocol comes from the binding and edge_timestamp is the given receipt time.
 [[nodiscard]] std::optional<domain::TelemetryPoint> make_point(const ItemBinding& binding,
-                                                               const opcua::DataChange& change,
+                                                               const acquisition::Update& update,
                                                                domain::Timestamp edge_timestamp);
 
 } // namespace ieg::runtime::detail
