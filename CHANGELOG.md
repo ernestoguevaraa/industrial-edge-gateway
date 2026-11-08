@@ -23,6 +23,13 @@
   float32 with explicit word order, optional scale, and an explicit `DecodeResult`/`DecodeError`
   policy (insufficient data, table/type mismatch, invalid word order or scale, non-finite values).
   Not yet used by the runtime.
+- Modbus TCP client: SDK-neutral `IModbusClient` (connect, read bits/registers into caller
+  buffers as `BitBlock`/`RegisterBlock`, close) and `LibModbusClient` on libmodbus 3.1.10 (Ubuntu
+  24.04 `libmodbus-dev`, exact version checked by CMake). Single owner thread, no internal threads,
+  no retries; typed errors (connection failed/lost, timeout, Modbus exception code, protocol
+  error) with the native `errno` or exception code; protocol request limits validated before I/O.
+  Not yet used by the runtime; the gateway executable does not link libmodbus. Build
+  prerequisite: `libmodbus-dev`.
 - `configs/gateway.mixed.example.yaml` documents a mixed OPC UA + Modbus TCP deployment. Modbus
   TCP acquisition is **not implemented yet**: the gateway rejects configured Modbus devices at
   startup with exit code 2. The MVP 1 example and Compose demo are unchanged.

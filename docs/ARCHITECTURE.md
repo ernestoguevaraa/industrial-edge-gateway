@@ -339,6 +339,8 @@ transitions and a periodic summary (delivered, dropped and failed counts, queue 
   failures), and the runtime wired to the real `OpcUaSource` over a mocked OPC UA client
 - Multi-source configuration (Modbus schema validation) and the transport-independent Modbus data
   decoder (`ieg::modbus::decode`; not yet used by the runtime)
+- The Modbus TCP client (`LibModbusClient`, libmodbus 3.1.10) against a deterministic in-process
+  Modbus TCP server, and a scripted `FakeModbusClient` for future poller tests
 
 ### Integration tests
 
@@ -380,7 +382,8 @@ TLS, certificates and mTLS are planned for a later milestone.
 
 ```text
 MVP 1  OPC UA -> MQTT                      (v0.1.0, implemented)
-MVP 2  Modbus + common acquisition model   (in progress: acquisition API, config, decoder done)
+MVP 2  Modbus + common acquisition model   (in progress: acquisition API, config, decoder,
+                                            TCP client done; polling and runtime pending)
 MVP 3  SQLite store-and-forward
 MVP 4  metrics / observability
 v1.0   ISA-95 asset modeling + failure scenarios

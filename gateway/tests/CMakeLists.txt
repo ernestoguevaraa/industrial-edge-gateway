@@ -13,6 +13,9 @@ add_executable(
   opcua/opcua_client_mock_test.cpp
   opcua/status_code_test.cpp
   modbus/decoder_test.cpp
+  modbus/libmodbus_client_test.cpp
+  modbus/libmodbus_errors_test.cpp
+  modbus/modbus_client_test.cpp
   mqtt/completion_registry_test.cpp
   mqtt/mqtt_publisher_test.cpp
   mqtt/paho_trace_test.cpp
@@ -34,6 +37,8 @@ target_link_libraries(
           gateway_acquisition_opcua
           gateway_domain
           gateway_modbus_decoder
+          gateway_modbus_tcp
+          libmodbus::libmodbus
           gateway_mqtt
           gateway_opcua_api
           gateway_opcua_open62541

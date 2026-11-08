@@ -36,6 +36,20 @@ add_library(gateway_modbus_decoder STATIC src/modbus/decoder.cpp)
 target_include_directories(gateway_modbus_decoder PUBLIC include)
 gateway_set_warnings(gateway_modbus_decoder)
 
+# SDK-neutral Modbus client abstraction (IModbusClient, errors, request validation).
+add_library(gateway_modbus_api STATIC src/modbus/modbus_client.cpp)
+target_include_directories(gateway_modbus_api PUBLIC include)
+target_link_libraries(gateway_modbus_api PUBLIC gateway_modbus_decoder)
+gateway_set_warnings(gateway_modbus_api)
+
+# libmodbus-backed Modbus TCP client. libmodbus is linked PRIVATE so it cannot leak into
+# dependants; the private headers under src/ are only reachable by this target and its tests.
+# Not linked into the gateway executable yet (no polling/runtime integration).
+add_library(gateway_modbus_tcp STATIC src/modbus/libmodbus_client.cpp src/modbus/libmodbus_errors.cpp)
+target_include_directories(gateway_modbus_tcp PRIVATE src)
+target_link_libraries(gateway_modbus_tcp PUBLIC gateway_modbus_api PRIVATE libmodbus::libmodbus)
+gateway_set_warnings(gateway_modbus_tcp)
+
 # Protocol-neutral output publisher abstraction (header-only; no MQTT dependency).
 add_library(gateway_output_api INTERFACE)
 target_include_directories(gateway_output_api INTERFACE include)

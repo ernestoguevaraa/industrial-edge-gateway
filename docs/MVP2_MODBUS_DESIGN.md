@@ -1,6 +1,6 @@
 # MVP 2 — Modbus TCP acquisition design
 
-Status: In progress — increments 2.2 (common ingress model, OPC UA bridge, runtime migration), 2.3 (multi-source YAML configuration) and 2.4 (data decoder) implemented; Modbus transport/polling not started\
+Status: In progress — increments 2.2 (common ingress model, OPC UA bridge, runtime migration), 2.3 (multi-source YAML configuration), 2.4 (data decoder) and 2.5 (Modbus TCP transport client) implemented; polling and runtime integration not started\
 Tracking: [Issue #1](https://github.com/ernestoguevaraa/industrial-edge-gateway/issues/1)
 
 ## Motivation
@@ -160,6 +160,100 @@ stable snake_case name for logs and diagnostics. Unit tests cover minimum/maximu
 zero values, IEEE 754 patterns (signed zero, subnormal, extremes, NaN, infinities), both word
 orders, scaling and every error; they also pass under AddressSanitizer and UBSan.
 
+## Modbus TCP transport (increment 2.5, implemented)
+
+`ieg::modbus::IModbusClient` (`gateway/include/ieg/modbus/modbus_client.hpp`, target
+`gateway_modbus_api`) is the SDK-neutral client interface; `LibModbusClient`
+(`libmodbus_client.hpp`, target `gateway_modbus_tcp`) implements it with libmodbus. Neither is
+used by the runtime yet (no poller), and the gateway executable does not link libmodbus.
+
+### Dependency
+
+libmodbus **3.1.10**, from the Ubuntu 24.04 package `libmodbus-dev` (3.1.10-1ubuntu1, universe).
+CMake requires exactly this upstream version (parsed from `modbus-version.h`) and links the
+shared library through the imported target `libmodbus::libmodbus`, privately to
+`gateway_modbus_tcp`. Rationale: libmodbus has only an autotools build, the project already takes
+Mbed TLS from the same distribution, and dynamic linking keeps LGPL-2.1 compliance simple. CI,
+the gateway image build stage and the runbook install `libmodbus-dev`.
+
+Known issue: CVE-2024-10918 (fixed upstream in 3.1.11) affects libmodbus' **server** reply path
+(`modbus_reply`); Ubuntu's tracker still lists noble as "needs evaluation". The gateway only uses
+client calls, and the tests' Modbus server is a separate POSIX implementation that does not use
+libmodbus' server API. Re-evaluate when Ubuntu publishes a fixed package or before using
+libmodbus server functions.
+
+### Interface and contract
+
+- `connect()` (re)establishes the connection, closing an existing one first; `connected()`;
+  `close()` is idempotent and safe before `connect()`; the destructor closes.
+- `read_registers(table, start, std::span<std::uint16_t> out)` (holding: FC03, input: FC04) and
+  `read_bits(table, start, std::span<std::uint8_t> out)` (coils: FC01, discrete inputs: FC02)
+  read `out.size()` values into the caller's buffer and return a `RegisterBlock`/`BitBlock` that
+  views it and carries `table` and `start`, ready for `decode()`.
+- Results are `ModbusResult<T>` (value or `ModbusError`); nothing throws for I/O failures.
+- **Single owner thread.** The client is not thread-safe and creates no threads; every call,
+  including `close()` and the destructor, comes from one owner thread.
+- **No hidden retries or reconnects.** libmodbus' error recovery is disabled; a read never
+  connects implicitly. After `ConnectionLost`, `Timeout` or `ProtocolError` the client closes the
+  connection itself (a late or partial response would desynchronise the stream) and the owner
+  must call `connect()` again. A Modbus exception is a valid answer and keeps the connection.
+- Options come from the device configuration (`client_options_from()`): host, port, unit ID
+  (sent in every MBAP header) and `timeout_ms`.
+
+### Request limits
+
+Validated before any I/O (`validate_read()`, also used by the test fake): the call must match the
+table kind, the quantity must be 1..2000 for bits (FC01/FC02) and 1..125 for registers
+(FC03/FC04), and `start + quantity` must not exceed 65536. Violations return `InvalidRequest`
+without touching the connection.
+
+### Errors
+
+| `ModbusErrorKind` | When | Native code |
+|---|---|---|
+| `InvalidRequest` | rejected before I/O (limits, table kind) | – |
+| `NotConnected` | read without an established connection | – |
+| `ConnectionFailed` | `connect()` failed: refused, unreachable, name resolution, connect timeout | `system_errno` (e.g. `ECONNREFUSED`; `EINPROGRESS`/`ETIMEDOUT` for a connect timeout) |
+| `ConnectionLost` | the connection failed during a request (reset, closed by the peer) | `system_errno` (e.g. `ECONNRESET`, `EPIPE`) |
+| `Timeout` | no complete response within `timeout_ms` | `system_errno = ETIMEDOUT` |
+| `ModbusException` | exception response from the server | `exception_code` (1..11), never `system_errno` |
+| `ProtocolError` | response does not answer the request (transaction ID, length, value count, exception code ≥ 12) | – (libmodbus `EMB*` text in `detail`) |
+
+libmodbus encodes exception codes as `MODBUS_ENOBASE + code` in `errno`; the client decodes them
+into `exception_code` and never reports them as `system_errno`. libmodbus 3.1.10 does not
+preserve exception codes ≥ 12 (they become `EMBBADEXC`), so those are `ProtocolError`.
+
+### Timeouts and shutdown
+
+- `connect()` waits at most `timeout_ms` for the TCP handshake **per resolved address** (a host
+  name resolving to several addresses is tried address by address). Name resolution
+  (`getaddrinfo`) happens before and is **not** bounded by `timeout_ms`; use IP addresses or a
+  local resolver where this matters.
+- A read sends the request and waits for the complete response within `timeout_ms` in total:
+  the libmodbus byte timeout is disabled, so the deadline is not restarted per received chunk
+  (libmodbus reuses one `timeval` across `select()` calls, which Linux decrements).
+- **There is no cancellation of a blocked call.** `close()` or destruction from another thread
+  while a call is running is a data race and is not supported. To shut down, the owner thread
+  (the future poller) checks its stop flag between requests and then calls `close()`; stop
+  latency is bounded by the call in progress (≈ `timeout_ms`, plus name resolution for
+  `connect()`). Keep `timeout_ms` short for responsive shutdown. A cross-thread interrupt (e.g.
+  `shutdown(2)` on the socket) is deliberately not offered, because libmodbus does not support it
+  safely.
+- Writes use `MSG_NOSIGNAL` (libmodbus), so a closed peer cannot raise `SIGPIPE`.
+
+### Tests
+
+- Unit tests: request validation, result API, error-kind names, libmodbus error classification
+  (`errno`/`EMB*` → `ModbusError`), and `FakeModbusClient`
+  (`gateway/tests/modbus/fake_modbus_client.hpp`), a scripted `IModbusClient` with the same
+  validation and connection rules for future poller tests.
+- Deterministic loopback tests (`libmodbus_client_test.cpp`) run the real `LibModbusClient`
+  against an in-process Modbus TCP server on 127.0.0.1 with an ephemeral port
+  (`modbus_test_server.hpp`, plain POSIX sockets, no external process): reads of every table
+  including maximum quantities at the end of the address space, unit ID, unavailable server,
+  timeouts and explicit reconnection, exception codes, protocol errors, connection loss,
+  reconnect while connected, idempotent close and destruction.
+
 ## Modbus behavior
 
 - Prefer a maintained Modbus library (evaluate libmodbus before committing to a dependency). Keep the transport library private to the adapter target.
@@ -173,7 +267,7 @@ orders, scaling and every error; they also pass under AddressSanitizer and UBSan
 
 1. Common ingress model and tests; adapt OPC UA without changing MQTT output. *(Done: increment 2.2.)*
 2. Backward-compatible YAML configuration; Modbus-only and mixed validation. *(Done: increment 2.3; the runtime still rejects Modbus devices.)*
-3. Modbus codec tests, then Modbus TCP polling/reconnection adapter. *(Codec done: increment 2.4; transport and polling pending.)*
+3. Modbus codec tests, then Modbus TCP polling/reconnection adapter. *(Codec: increment 2.4; transport client: increment 2.5; polling pending.)*
 4. Runtime multi-source lifecycle wiring and per-source diagnostics.
 5. Deterministic Modbus simulator, Compose demo, integration and E2E tests for mixed acquisition and recovery.
 6. README, runbook, architecture and changelog updates; CI and release verification.

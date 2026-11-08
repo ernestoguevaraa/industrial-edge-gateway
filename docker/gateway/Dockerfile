@@ -6,9 +6,11 @@
 
 FROM ubuntu:24.04 AS build
 ARG DEBIAN_FRONTEND=noninteractive
+# libmodbus-dev: required by the CMake configuration (Modbus TCP client library). The gateway
+# executable does not link libmodbus yet, so the runtime stage does not need libmodbus5.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates cmake g++ libmbedtls-dev ninja-build \
+        ca-certificates cmake g++ libmbedtls-dev libmodbus-dev ninja-build \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY CMakeLists.txt ./

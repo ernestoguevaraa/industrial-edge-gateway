@@ -24,6 +24,7 @@ To build and test the gateway locally (section 7):
 
 - Linux or WSL2, CMake ≥ 3.25, GCC or Clang with C++20, Ninja (optional)
 - `libmbedtls-dev` (required by the official open62541 amalgamation)
+- `libmodbus-dev` (libmodbus 3.1.10, the Ubuntu 24.04 package; Modbus TCP client, MVP 2)
 - Python 3.12 (simulator) and `mosquitto` (broker binary) for the integration tests
 
 Optional local debugging tools:
