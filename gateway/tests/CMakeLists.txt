@@ -8,6 +8,7 @@ add_executable(
   domain/telemetry_json_test.cpp
   common/backoff_test.cpp
   opcua/open62541_client_test.cpp
+  acquisition/opcua_source_test.cpp
   opcua/opcua_client_mock_test.cpp
   opcua/status_code_test.cpp
   mqtt/completion_registry_test.cpp
@@ -27,6 +28,7 @@ target_link_libraries(
   gateway_tests
   PRIVATE gateway_config
           gateway_core
+          gateway_acquisition_opcua
           gateway_domain
           gateway_mqtt
           gateway_opcua_api
