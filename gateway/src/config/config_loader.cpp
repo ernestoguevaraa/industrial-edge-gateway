@@ -3,8 +3,10 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -110,6 +112,58 @@ bool is_valid_tag(const std::string& tag)
     return std::regex_match(tag, pattern);
 }
 
+bool is_valid_source_id(const std::string& id)
+{
+    static const std::regex pattern{R"([a-z0-9][a-z0-9_-]{0,63})"};
+    return std::regex_match(id, pattern);
+}
+
+template <typename Enum>
+struct EnumName
+{
+    std::string_view name;
+    Enum value;
+};
+
+constexpr std::array<EnumName<ModbusTable>, 4> kModbusTables{{
+    {"coils", ModbusTable::Coils},
+    {"discrete_inputs", ModbusTable::DiscreteInputs},
+    {"holding_registers", ModbusTable::HoldingRegisters},
+    {"input_registers", ModbusTable::InputRegisters},
+}};
+
+constexpr std::array<EnumName<ModbusDataType>, 6> kModbusTypes{{
+    {"bool", ModbusDataType::Bool},
+    {"uint16", ModbusDataType::UInt16},
+    {"int16", ModbusDataType::Int16},
+    {"uint32", ModbusDataType::UInt32},
+    {"int32", ModbusDataType::Int32},
+    {"float32", ModbusDataType::Float32},
+}};
+
+constexpr std::array<EnumName<ModbusWordOrder>, 2> kModbusWordOrders{{
+    {"high_word_first", ModbusWordOrder::HighWordFirst},
+    {"low_word_first", ModbusWordOrder::LowWordFirst},
+}};
+
+template <typename Enum, std::size_t N>
+std::string_view name_of(const std::array<EnumName<Enum>, N>& names, Enum value)
+{
+    const auto* const it = std::ranges::find(names, value, &EnumName<Enum>::value);
+    return it == names.end() ? std::string_view{"?"} : it->name;
+}
+
+template <typename Enum, std::size_t N>
+std::string names_of(const std::array<EnumName<Enum>, N>& names)
+{
+    std::vector<std::string_view> list;
+    list.reserve(N);
+    for (const auto& entry : names) {
+        list.push_back(entry.name);
+    }
+    return join(list, ", ");
+}
+
 // Syntactic check only; the OPC UA adapter performs the definitive NodeId parsing.
 bool is_valid_node_id(const std::string& node_id)
 {
@@ -120,6 +174,13 @@ bool is_valid_node_id(const std::string& node_id)
 struct ScalarField
 {
     std::string value;
+    YAML::Mark mark;
+};
+
+template <typename T>
+struct Marked
+{
+    T value;
     YAML::Mark mark;
 };
 
@@ -285,20 +346,116 @@ private:
         add_error(mark, path, std::format("{} (first at {}{})", problem, first.path, line));
     }
 
+    // Like read_integer, but also returns the value's position for later cross-field errors.
+    std::optional<Marked<std::int64_t>>
+    read_marked_integer(const YAML::Node& map, std::string_view key, std::string_view path,
+                        std::int64_t min, std::int64_t max, std::string_view expected,
+                        bool required = true)
+    {
+        const auto value = read_integer(map, key, path, min, max, expected, required);
+        if (!value) {
+            return std::nullopt;
+        }
+        return Marked<std::int64_t>{.value = *value, .mark = map[std::string{key}].Mark()};
+    }
+
+    template <typename Enum, std::size_t N>
+    std::optional<Marked<Enum>>
+    read_enum(const YAML::Node& map, std::string_view key, std::string_view path,
+              const std::array<EnumName<Enum>, N>& names, bool required = true)
+    {
+        const auto text = read_string(map, key, path, required);
+        if (!text) {
+            return std::nullopt;
+        }
+        const auto* const it = std::ranges::find(names, text->value, &EnumName<Enum>::name);
+        if (it == names.end()) {
+            add_error(text->mark, child_path(path, key),
+                      std::format("invalid value '{}'; expected one of: {}", text->value,
+                                  names_of(names)));
+            return std::nullopt;
+        }
+        return Marked<Enum>{.value = it->value, .mark = text->mark};
+    }
+
+    // Finite, non-zero number (integer or decimal notation; quoted strings are rejected).
+    std::optional<Marked<double>> read_scale(const YAML::Node& map, std::string_view key,
+                                             std::string_view path)
+    {
+        const auto node = field(map, key, path, false);
+        if (!node) {
+            return std::nullopt;
+        }
+        const auto key_path = child_path(path, key);
+        constexpr std::string_view expected = "a finite, non-zero number";
+        if (!node->IsScalar() || node->Tag() == "!") {
+            add_error(node->Mark(), key_path,
+                      std::format("expected {}, got {}", expected,
+                                  node->IsScalar() ? "a quoted string" : kind_of(*node)));
+            return std::nullopt;
+        }
+        const std::string& text = node->Scalar();
+        double value{};
+        const auto* const end = text.data() + text.size();
+        const auto [ptr, ec] = std::from_chars(text.data(), end, value);
+        if (ec != std::errc{} || ptr != end || !std::isfinite(value) || value == 0.0) {
+            add_error(node->Mark(), key_path, std::format("expected {}, got '{}'", expected, text));
+            return std::nullopt;
+        }
+        return Marked<double>{.value = value, .mark = node->Mark()};
+    }
+
+    void check_host(const ScalarField& host, const std::string& path)
+    {
+        if (host.value.empty()) {
+            add_error(host.mark, path, "must not be empty");
+        } else if (contains_whitespace(host.value)) {
+            add_error(host.mark, path, std::format("'{}' must not contain whitespace", host.value));
+        }
+    }
+
+    void check_asset(const ScalarField& asset, const std::string& path)
+    {
+        if (!is_valid_asset(asset.value)) {
+            add_error(asset.mark, path,
+                      std::format("'{}' is invalid; expected at least 3 dot-separated lowercase "
+                                  "segments matching [a-z0-9_-]+ (e.g. site01.line01.press01)",
+                                  asset.value));
+        }
+    }
+
+    // Validates the tag and enforces global (asset, tag) uniqueness across every source.
+    void check_tag(const ScalarField& tag, const std::string& path,
+                   const std::optional<ScalarField>& asset)
+    {
+        if (!is_valid_tag(tag.value)) {
+            add_error(tag.mark, path,
+                      std::format("'{}' is invalid; expected a lowercase identifier "
+                                  "matching [a-z0-9_-]+",
+                                  tag.value));
+        }
+        if (asset) {
+            check_unique(tag_first_seen_, std::pair{asset->value, tag.value}, path, tag.mark,
+                         std::format("duplicate tag '{}' for asset '{}'", tag.value, asset->value));
+        }
+    }
+
     GatewayConfig parse_root(const YAML::Node& root)
     {
         GatewayConfig config;
         if (root.IsNull()) {
             add_error(root.Mark(), "",
-                      "configuration is empty; expected a mapping with keys opcua, mqtt, assets");
+                      "configuration is empty; expected a mapping with key mqtt and at least one "
+                      "acquisition source (opcua with assets, and/or modbus)");
             return config;
         }
         if (!expect_map(root, "")) {
             return config;
         }
-        check_keys(root, "", {"opcua", "mqtt", "runtime", "assets"});
+        check_keys(root, "", {"opcua", "mqtt", "runtime", "assets", "modbus"});
 
-        if (const auto opcua = field(root, "opcua", "", true)) {
+        const auto opcua = field(root, "opcua", "", false);
+        if (opcua) {
             config.opcua = parse_opcua(*opcua);
         }
         if (const auto mqtt = field(root, "mqtt", "", true)) {
@@ -307,10 +464,32 @@ private:
         if (const auto runtime = field(root, "runtime", "", false)) {
             config.runtime = parse_runtime(*runtime);
         }
-        if (const auto assets = field(root, "assets", "", true)) {
+        const auto assets = field(root, "assets", "", false);
+        if (assets) {
             config.assets = parse_assets(*assets);
         }
+        const auto modbus = field(root, "modbus", "", false);
+        if (modbus) {
+            config.modbus = parse_modbus(*modbus);
+        }
+        check_sources(root, opcua.has_value(), assets.has_value(), modbus.has_value());
         return config;
+    }
+
+    // OPC UA is configured by opcua + assets together; at least one source must exist.
+    void check_sources(const YAML::Node& root, bool opcua, bool assets, bool modbus)
+    {
+        if (opcua && !assets) {
+            add_error(root.Mark(), "",
+                      "missing required key 'assets' (required when 'opcua' is configured)");
+        } else if (assets && !opcua) {
+            add_error(root.Mark(), "",
+                      "missing required key 'opcua' (required when 'assets' is configured)");
+        } else if (!opcua && !modbus) {
+            add_error(root.Mark(), "",
+                      "no acquisition source configured; expected 'opcua' with 'assets' "
+                      "(OPC UA) and/or 'modbus' (Modbus TCP)");
+        }
     }
 
     OpcUaConfig parse_opcua(const YAML::Node& node)
@@ -348,12 +527,7 @@ private:
         check_keys(node, path, {"host", "port", "qos", "topic_prefix", "client_id"});
 
         if (const auto host = read_string(node, "host", path)) {
-            if (host->value.empty()) {
-                add_error(host->mark, "mqtt.host", "must not be empty");
-            } else if (contains_whitespace(host->value)) {
-                add_error(host->mark, "mqtt.host",
-                          std::format("'{}' must not contain whitespace", host->value));
-            }
+            check_host(*host, "mqtt.host");
             mqtt.host = host->value;
         }
         if (const auto port =
@@ -426,13 +600,7 @@ private:
         const auto id = read_string(node, "asset", path);
         if (id) {
             const auto id_path = child_path(path, "asset");
-            if (!is_valid_asset(id->value)) {
-                add_error(
-                    id->mark, id_path,
-                    std::format("'{}' is invalid; expected at least 3 dot-separated lowercase "
-                                "segments matching [a-z0-9_-]+ (e.g. site01.line01.press01)",
-                                id->value));
-            }
+            check_asset(*id, id_path);
             check_unique(
                 asset_first_seen_, id->value, id_path, id->mark,
                 std::format("asset '{}' is declared in more than one asset block", id->value));
@@ -475,18 +643,7 @@ private:
         }
 
         if (const auto tag = read_string(node, "tag", path)) {
-            const auto tag_path = child_path(path, "tag");
-            if (!is_valid_tag(tag->value)) {
-                add_error(tag->mark, tag_path,
-                          std::format("'{}' is invalid; expected a lowercase identifier "
-                                      "matching [a-z0-9_-]+",
-                                      tag->value));
-            }
-            if (asset) {
-                check_unique(
-                    tag_first_seen_, std::pair{asset->value, tag->value}, tag_path, tag->mark,
-                    std::format("duplicate tag '{}' for asset '{}'", tag->value, asset->value));
-            }
+            check_tag(*tag, child_path(path, "tag"), asset);
             result.tag = tag->value;
         }
 
@@ -496,11 +653,213 @@ private:
         return result;
     }
 
+    // ---- Modbus TCP ---------------------------------------------------------------------------
+
+    ModbusConfig parse_modbus(const YAML::Node& node)
+    {
+        constexpr std::string_view path = "modbus";
+        ModbusConfig modbus;
+        if (!expect_map(node, path)) {
+            return modbus;
+        }
+        check_keys(node, path, {"devices"});
+        if (const auto devices = field(node, "devices", path, true)) {
+            if (expect_non_empty_sequence(*devices, "modbus.devices", "device")) {
+                std::size_t index = 0;
+                for (const auto& device : *devices) {
+                    modbus.devices.push_back(
+                        parse_modbus_device(device, std::format("modbus.devices[{}]", index++)));
+                }
+            }
+        }
+        return modbus;
+    }
+
+    void parse_source_id(const YAML::Node& node, const std::string& path, std::string& out)
+    {
+        const auto id = read_string(node, "source_id", path);
+        if (!id) {
+            return;
+        }
+        const auto id_path = child_path(path, "source_id");
+        if (!is_valid_source_id(id->value)) {
+            add_error(id->mark, id_path,
+                      std::format("'{}' is invalid; expected 1 to 64 characters matching "
+                                  "[a-z0-9][a-z0-9_-]*",
+                                  id->value));
+        } else if (id->value == kOpcUaSourceId) {
+            add_error(id->mark, id_path,
+                      std::format("'{}' is reserved for the OPC UA source", id->value));
+        }
+        check_unique(source_first_seen_, id->value, id_path, id->mark,
+                     std::format("duplicate source_id '{}'", id->value));
+        out = id->value;
+    }
+
+    ModbusDeviceConfig parse_modbus_device(const YAML::Node& node, const std::string& path)
+    {
+        ModbusDeviceConfig device;
+        if (!expect_map(node, path)) {
+            return device;
+        }
+        check_keys(
+            node, path,
+            {"source_id", "host", "port", "unit_id", "poll_interval_ms", "timeout_ms", "points"});
+        parse_source_id(node, path, device.source_id);
+        if (const auto host = read_string(node, "host", path)) {
+            check_host(*host, child_path(path, "host"));
+            device.host = host->value;
+        }
+        if (const auto port = read_integer(node, "port", path, 1, 65'535,
+                                           "an integer between 1 and 65535", false)) {
+            device.port = static_cast<std::uint16_t>(*port);
+        }
+        if (const auto unit_id =
+                read_integer(node, "unit_id", path, 1, 255, "an integer between 1 and 255")) {
+            device.unit_id = static_cast<std::uint8_t>(*unit_id);
+        }
+        parse_modbus_timing(node, path, device);
+        if (const auto points = field(node, "points", path, true)) {
+            const auto points_path = child_path(path, "points");
+            if (expect_non_empty_sequence(*points, points_path, "point")) {
+                std::size_t index = 0;
+                for (const auto& point : *points) {
+                    device.points.push_back(
+                        parse_modbus_point(point, std::format("{}[{}]", points_path, index++)));
+                }
+            }
+        }
+        return device;
+    }
+
+    void parse_modbus_timing(const YAML::Node& node, const std::string& path,
+                             ModbusDeviceConfig& device)
+    {
+        if (const auto poll = read_integer(node, "poll_interval_ms", path, 100, 3'600'000,
+                                           "an integer between 100 and 3600000", false)) {
+            device.poll_interval = std::chrono::milliseconds{*poll};
+        }
+        const auto timeout = read_marked_integer(node, "timeout_ms", path, 10, 60'000,
+                                                 "an integer between 10 and 60000", false);
+        if (!timeout) {
+            // Only an explicit timeout can conflict with the poll interval.
+            device.timeout = std::min(device.timeout, device.poll_interval);
+            return;
+        }
+        device.timeout = std::chrono::milliseconds{timeout->value};
+        if (device.timeout > device.poll_interval) {
+            add_error(timeout->mark, child_path(path, "timeout_ms"),
+                      std::format("{} ms must not exceed poll_interval_ms ({} ms)",
+                                  device.timeout.count(), device.poll_interval.count()));
+        }
+    }
+
+    ModbusPointConfig parse_modbus_point(const YAML::Node& node, const std::string& path)
+    {
+        ModbusPointConfig point;
+        if (!expect_map(node, path)) {
+            return point;
+        }
+        check_keys(node, path,
+                   {"asset", "tag", "unit", "table", "offset", "type", "word_order", "scale"});
+        const auto asset = read_string(node, "asset", path);
+        if (asset) {
+            check_asset(*asset, child_path(path, "asset"));
+            point.asset = asset->value;
+        }
+        if (const auto tag = read_string(node, "tag", path)) {
+            check_tag(*tag, child_path(path, "tag"), asset);
+            point.tag = tag->value;
+        }
+        if (const auto unit = read_string(node, "unit", path, false)) {
+            point.unit = unit->value;
+        }
+        const auto table = read_enum(node, "table", path, kModbusTables);
+        const auto offset = read_marked_integer(node, "offset", path, 0, 65'535,
+                                                "a zero-based address between 0 and 65535");
+        const auto type = read_enum(node, "type", path, kModbusTypes);
+        const auto word_order = read_enum(node, "word_order", path, kModbusWordOrders, false);
+        const auto scale = read_scale(node, "scale", path);
+
+        point.table = table ? table->value : point.table;
+        point.offset = offset ? static_cast<std::uint16_t>(offset->value) : point.offset;
+        point.type = type ? type->value : point.type;
+        point.word_order =
+            word_order ? std::optional{word_order->value} : std::optional<ModbusWordOrder>{};
+        point.scale = scale ? std::optional{scale->value} : std::optional<double>{};
+        if (type) {
+            check_type_options(node, path, *type, word_order, scale);
+            if (table) {
+                check_type_in_table(path, *table, *type);
+            }
+            if (offset) {
+                check_register_range(path, *offset, type->value);
+            }
+        }
+        return point;
+    }
+
+    void check_type_in_table(const std::string& path, const Marked<ModbusTable>& table,
+                             const Marked<ModbusDataType>& type)
+    {
+        const bool bool_type = type.value == ModbusDataType::Bool;
+        if (is_bit_table(table.value) && !bool_type) {
+            add_error(type.mark, child_path(path, "type"),
+                      std::format("'{}' is not valid for table '{}'; coils and discrete_inputs "
+                                  "only support bool",
+                                  name_of(kModbusTypes, type.value),
+                                  name_of(kModbusTables, table.value)));
+        } else if (!is_bit_table(table.value) && bool_type) {
+            add_error(type.mark, child_path(path, "type"),
+                      std::format("'bool' is not valid for table '{}'; use coils or "
+                                  "discrete_inputs (bits inside registers are not supported)",
+                                  name_of(kModbusTables, table.value)));
+        }
+    }
+
+    void check_register_range(const std::string& path, const Marked<std::int64_t>& offset,
+                              ModbusDataType type)
+    {
+        constexpr std::int64_t kLastAddress = 65'535;
+        const auto last = offset.value + modbus_width(type) - 1;
+        if (last > kLastAddress) {
+            add_error(offset.mark, child_path(path, "offset"),
+                      std::format("'{}' at offset {} needs addresses {}..{}, beyond the last "
+                                  "address {}",
+                                  name_of(kModbusTypes, type), offset.value, offset.value, last,
+                                  kLastAddress));
+        }
+    }
+
+    void check_type_options(const YAML::Node& node, const std::string& path,
+                            const Marked<ModbusDataType>& type,
+                            const std::optional<Marked<ModbusWordOrder>>& word_order,
+                            const std::optional<Marked<double>>& scale)
+    {
+        const auto type_name = name_of(kModbusTypes, type.value);
+        const bool wide = modbus_width(type.value) == 2;
+        if (wide && !word_order && !node["word_order"].IsDefined()) {
+            add_error(node.Mark(), path,
+                      std::format("missing required key 'word_order' for 32-bit type '{}'; "
+                                  "expected one of: {}",
+                                  type_name, names_of(kModbusWordOrders)));
+        } else if (!wide && word_order) {
+            add_error(word_order->mark, child_path(path, "word_order"),
+                      std::format("is only valid for 32-bit types (uint32, int32, float32), not "
+                                  "'{}'",
+                                  type_name));
+        }
+        if (type.value == ModbusDataType::Bool && scale) {
+            add_error(scale->mark, child_path(path, "scale"), "is not valid for type 'bool'");
+        }
+    }
+
     std::string source_name_;
     std::vector<std::string> errors_;
     std::map<std::string, FirstSeen> asset_first_seen_;
     std::map<std::string, FirstSeen> node_id_first_seen_;
     std::map<std::pair<std::string, std::string>, FirstSeen> tag_first_seen_;
+    std::map<std::string, FirstSeen> source_first_seen_;
 };
 
 } // namespace

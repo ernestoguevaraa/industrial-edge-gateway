@@ -69,6 +69,28 @@ if(NOT MBEDTLS_INCLUDE_DIR OR NOT MBEDTLS_LIBRARY OR NOT MBEDX509_LIBRARY OR NOT
                       "(install libmbedtls-dev)")
 endif()
 
+# libmodbus (Modbus TCP client, MVP 2): the Ubuntu 24.04 package libmodbus-dev, pinned to the
+# upstream release it ships. libmodbus has no CMake build (autotools), is LGPL-2.1-or-later and
+# is linked dynamically. Only the client API is used.
+set(GATEWAY_LIBMODBUS_VERSION 3.1.10)
+find_path(LIBMODBUS_INCLUDE_DIR modbus.h PATH_SUFFIXES modbus)
+find_library(LIBMODBUS_LIBRARY modbus)
+if(NOT LIBMODBUS_INCLUDE_DIR OR NOT LIBMODBUS_LIBRARY)
+  message(FATAL_ERROR "libmodbus ${GATEWAY_LIBMODBUS_VERSION} not found (Ubuntu 24.04: install libmodbus-dev)")
+endif()
+file(STRINGS "${LIBMODBUS_INCLUDE_DIR}/modbus-version.h" libmodbus_version_line
+     REGEX "^#define LIBMODBUS_VERSION_STRING \"[0-9.]+\"$" LIMIT_COUNT 1)
+string(REGEX REPLACE ".*\"([0-9.]+)\".*" "\\1" libmodbus_found_version "${libmodbus_version_line}")
+if(NOT libmodbus_found_version VERSION_EQUAL GATEWAY_LIBMODBUS_VERSION)
+  message(FATAL_ERROR "libmodbus ${GATEWAY_LIBMODBUS_VERSION} is required, found "
+                      "'${libmodbus_found_version}' in ${LIBMODBUS_INCLUDE_DIR}")
+endif()
+add_library(libmodbus::libmodbus UNKNOWN IMPORTED)
+# Include directories of imported targets are treated as system includes.
+set_target_properties(libmodbus::libmodbus PROPERTIES IMPORTED_LOCATION "${LIBMODBUS_LIBRARY}"
+                                                      INTERFACE_INCLUDE_DIRECTORIES "${LIBMODBUS_INCLUDE_DIR}")
+message(STATUS "libmodbus ${libmodbus_found_version}: ${LIBMODBUS_LIBRARY}")
+
 find_package(Threads REQUIRED)
 add_library(open62541 STATIC "${open62541_source_SOURCE_DIR}/open62541.c")
 target_include_directories(open62541 SYSTEM PUBLIC "${open62541_header_SOURCE_DIR}")

@@ -1,9 +1,11 @@
-// End-to-end: the real gateway executable between the real Python OPC UA simulator and a real
-// Mosquitto broker. Skipped unless both IEG_SIMULATOR_PYTHON and IEG_MOSQUITTO are set.
+// End-to-end: the real gateway executable between the real Python OPC UA simulator, a
+// deterministic in-process Modbus TCP server and a real Mosquitto broker. Skipped unless both
+// IEG_SIMULATOR_PYTHON and IEG_MOSQUITTO are set.
 
 #include "integration/mosquitto_process.hpp"
 #include "integration/mqtt_test_subscriber.hpp"
 #include "integration/simulator_process.hpp"
+#include "modbus/modbus_test_server.hpp"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -17,6 +19,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -89,6 +92,153 @@ std::string gateway_config(std::uint16_t opcua_port, std::uint16_t mqtt_port, in
         }
     }
     return yaml.str();
+}
+
+// Modbus device "compressor-plc" served by the in-process test server: topic -> expected JSON
+// value.
+const std::map<std::string, nlohmann::json>& expected_modbus_values()
+{
+    static const std::map<std::string, nlohmann::json> values{
+        {"industrial/site01/line01/comp01/outlet_pressure", 7.5}, // holding 0 = 75, scale 0.1
+        {"industrial/site01/line01/comp01/running", true},        // coil 0
+        {"industrial/site01/line01/comp01/motor_current", 2.5},   // input 0..1, float32 ABCD
+    };
+    return values;
+}
+
+void serve_modbus_values(modbus::testing::ModbusTestServer& server, std::uint16_t pressure_raw)
+{
+    server.set_holding(0, pressure_raw);
+    server.set_coil(0, true);
+    server.set_input(0, 0x4020); // 2.5f = 0x40200000
+    server.set_input(1, 0x0000);
+}
+
+std::string modbus_section(std::uint16_t modbus_port)
+{
+    std::ostringstream yaml;
+    yaml << "modbus:\n  devices:\n"
+         << "    - source_id: \"compressor-plc\"\n      host: \"127.0.0.1\"\n      port: "
+         << modbus_port << "\n      unit_id: 1\n      poll_interval_ms: 100\n"
+         << "      timeout_ms: 100\n      points:\n"
+         << "        - {asset: \"site01.line01.comp01\", tag: \"outlet_pressure\", unit: \"bar\", "
+            "table: holding_registers, offset: 0, type: uint16, scale: 0.1}\n"
+         << "        - {asset: \"site01.line01.comp01\", tag: \"running\", unit: \"\", "
+            "table: coils, offset: 0, type: bool}\n"
+         << "        - {asset: \"site01.line01.comp01\", tag: \"motor_current\", unit: \"A\", "
+            "table: input_registers, offset: 0, type: float32, word_order: high_word_first}\n";
+    return yaml.str();
+}
+
+// The MQTT part of gateway_config() only (Modbus-only deployments have no opcua/assets).
+std::string mqtt_only_config(std::uint16_t mqtt_port)
+{
+    std::ostringstream yaml;
+    yaml << "mqtt:\n  host: \"127.0.0.1\"\n  port: " << mqtt_port << "\n  qos: 1\n"
+         << "  topic_prefix: \"industrial\"\n  client_id: \"ieg-e2e-gateway\"\n"
+         << "runtime:\n  queue_capacity: 1000\n  shutdown_drain_timeout_ms: 2000\n";
+    return yaml.str();
+}
+
+// A Modbus point payload: the expected value, protocol modbus_tcp, GOOD, no source timestamp.
+::testing::AssertionResult valid_modbus_payload(const std::string& topic,
+                                                const std::string& payload)
+{
+    const auto json = nlohmann::json::parse(payload, nullptr, false);
+    if (json.is_discarded()) {
+        return ::testing::AssertionFailure() << topic << ": payload is not JSON: " << payload;
+    }
+    if (json.value("protocol", "") != "modbus_tcp" || json.value("quality", "") != "GOOD" ||
+        !json.contains("source_timestamp") || !json["source_timestamp"].is_null() ||
+        !json["edge_timestamp"].is_string() ||
+        json.value("value", nlohmann::json{}) != expected_modbus_values().at(topic)) {
+        return ::testing::AssertionFailure() << topic << ": unexpected payload " << payload;
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// Latest payload per topic of `topics`, collected until all arrived or `timeout` passed.
+std::map<std::string, std::string> collect_latest_of(MqttTestSubscriber& subscriber,
+                                                     const std::set<std::string>& topics,
+                                                     std::chrono::milliseconds timeout)
+{
+    std::map<std::string, std::string> latest;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (latest.size() < topics.size() && std::chrono::steady_clock::now() < deadline) {
+        subscriber.wait_for_messages(subscriber.messages().size() + 1, 200ms);
+        for (const auto& message : subscriber.messages()) {
+            if (topics.contains(message.topic)) {
+                latest[message.topic] = message.payload;
+            }
+        }
+    }
+    return latest;
+}
+
+std::set<std::string> modbus_topics()
+{
+    std::set<std::string> topics;
+    for (const auto& [topic, value] : expected_modbus_values()) {
+        topics.insert(topic);
+    }
+    return topics;
+}
+
+// Waits until `topic` carries `value` in a message received after the first `skip` messages.
+bool wait_for_value(MqttTestSubscriber& subscriber, std::size_t skip, const std::string& topic,
+                    const nlohmann::json& value, std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto messages = subscriber.messages();
+        for (std::size_t i = skip; i < messages.size(); ++i) {
+            if (messages[i].topic != topic) {
+                continue;
+            }
+            const auto json = nlohmann::json::parse(messages[i].payload, nullptr, false);
+            if (!json.is_discarded() && json.value("value", nlohmann::json{}) == value) {
+                return true;
+            }
+        }
+        subscriber.wait_for_messages(messages.size() + 1, 200ms);
+    }
+    return false;
+}
+
+// Every payload in `latest` satisfies `valid` (topic, payload).
+template <typename Validator>
+::testing::AssertionResult all_valid(const std::map<std::string, std::string>& latest,
+                                     Validator valid)
+{
+    for (const auto& [topic, payload] : latest) {
+        if (auto result = valid(topic, payload); !result) {
+            return result;
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// `log` contains every expected fragment.
+::testing::AssertionResult log_contains(const std::string& log,
+                                        std::initializer_list<const char*> fragments)
+{
+    for (const char* fragment : fragments) {
+        if (log.find(fragment) == std::string::npos) {
+            return ::testing::AssertionFailure() << "log lacks '" << fragment << "':\n" << log;
+        }
+    }
+    return ::testing::AssertionSuccess();
+}
+
+// No message was published on an OPC UA topic.
+::testing::AssertionResult no_opcua_topics(const std::vector<MqttTestSubscriber::Message>& messages)
+{
+    for (const auto& message : messages) {
+        if (expected_topics().contains(message.topic)) {
+            return ::testing::AssertionFailure() << "unexpected OPC UA topic " << message.topic;
+        }
+    }
+    return ::testing::AssertionSuccess();
 }
 
 // Runs the gateway executable with its output captured to a file.
@@ -231,8 +381,24 @@ protected:
 
     std::filesystem::path write_config(int qos)
     {
+        return write_file(gateway_config(opcua_port(), broker_->port(), qos));
+    }
+
+    std::filesystem::path write_mixed_config(std::uint16_t modbus_port)
+    {
+        return write_file(gateway_config(opcua_port(), broker_->port(), 1) +
+                          modbus_section(modbus_port));
+    }
+
+    std::filesystem::path write_modbus_only_config(std::uint16_t modbus_port)
+    {
+        return write_file(mqtt_only_config(broker_->port()) + modbus_section(modbus_port));
+    }
+
+    std::filesystem::path write_file(const std::string& yaml)
+    {
         const auto path = directory_ / "gateway.yaml";
-        std::ofstream{path} << gateway_config(opcua_port(), broker_->port(), qos);
+        std::ofstream{path} << yaml;
         return path;
     }
 
@@ -289,6 +455,63 @@ TEST_F(GatewayEndToEnd, QosOtherThan1FailsAtStartupWithExitCode2)
     GatewayProcess gateway{write_config(0), log};
     EXPECT_EQ(gateway.wait_exit(10s), std::optional<int>{2});
     EXPECT_NE(read_file(log).find("mqtt.qos must be 1"), std::string::npos) << read_file(log);
+}
+
+TEST_F(GatewayEndToEnd, OpcUaAndModbusPublishThroughOneBrokerAndModbusRecovers)
+{
+    modbus::testing::ModbusTestServer modbus_server;
+    serve_modbus_values(modbus_server, 75);
+    MqttTestSubscriber subscriber{broker_uri(), "ieg-e2e-subscriber"};
+    subscriber.subscribe("industrial/#");
+
+    const auto log = directory() / "gateway.log";
+    GatewayProcess gateway{write_mixed_config(modbus_server.port()), log};
+
+    // MVP 1 OPC UA topics and payloads are unchanged next to the Modbus points.
+    const auto opcua = collect_latest(subscriber, 30s);
+    ASSERT_EQ(opcua.size(), expected_topics().size()) << read_file(log);
+    EXPECT_TRUE(all_valid(opcua, valid_payload));
+    const auto modbus = collect_latest_of(subscriber, modbus_topics(), 15s);
+    ASSERT_EQ(modbus.size(), expected_modbus_values().size()) << read_file(log);
+    EXPECT_TRUE(all_valid(modbus, valid_modbus_payload));
+
+    // Modbus outage: the server stops answering, then answers again with a new value. The same
+    // gateway process must time out, reconnect and publish the fresh value.
+    modbus_server.set_mode(modbus::testing::ModbusTestServer::Mode::Silent);
+    std::this_thread::sleep_for(500ms);
+    modbus_server.set_holding(0, 123); // 12.3 bar
+    const auto before = subscriber.messages().size();
+    modbus_server.set_mode(modbus::testing::ModbusTestServer::Mode::Normal);
+    EXPECT_TRUE(wait_for_value(subscriber, before,
+                               "industrial/site01/line01/comp01/outlet_pressure", 12.3, 20s))
+        << read_file(log);
+    EXPECT_GE(modbus_server.accepted(), 2);
+    EXPECT_EQ(modbus_server.last_unit_id(), 1);
+
+    gateway.signal(SIGTERM);
+    EXPECT_EQ(gateway.wait_exit(10s), std::optional<int>{0}) << read_file(log);
+    EXPECT_TRUE(log_contains(read_file(log),
+                             {"event=started sources=2", "component=opcua source_id=opcua-main",
+                              "component=modbus_tcp source_id=compressor-plc", "state=Disconnected",
+                              "detail=\"timeout: ", "event=stopped"}));
+}
+
+TEST_F(GatewayEndToEnd, ModbusOnlyConfigurationPublishesAndShutsDownCleanly)
+{
+    modbus::testing::ModbusTestServer modbus_server;
+    serve_modbus_values(modbus_server, 75);
+    MqttTestSubscriber subscriber{broker_uri(), "ieg-e2e-subscriber"};
+    subscriber.subscribe("industrial/#");
+
+    const auto log = directory() / "gateway.log";
+    GatewayProcess gateway{write_modbus_only_config(modbus_server.port()), log};
+    const auto modbus = collect_latest_of(subscriber, modbus_topics(), 15s);
+    ASSERT_EQ(modbus.size(), expected_modbus_values().size()) << read_file(log);
+    EXPECT_TRUE(all_valid(modbus, valid_modbus_payload));
+    EXPECT_TRUE(no_opcua_topics(subscriber.messages()));
+    gateway.signal(SIGTERM);
+    EXPECT_EQ(gateway.wait_exit(10s), std::optional<int>{0}) << read_file(log);
+    EXPECT_TRUE(log_contains(read_file(log), {"event=started sources=1"}));
 }
 
 } // namespace

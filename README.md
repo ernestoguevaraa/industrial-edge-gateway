@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/ernestoguevaraa/industrial-edge-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ernestoguevaraa/industrial-edge-gateway/actions/workflows/ci.yml)
 
-A **C++20 Industrial IoT edge gateway** that connects OPC UA servers to MQTT 5 using a normalized telemetry model.
+A **C++20 Industrial IoT edge gateway** that connects OPC UA servers and Modbus TCP devices to MQTT 5 using a normalized telemetry model.
 
-**Status: v0.1.0 (MVP 1).** A complete OPC UA → MQTT vertical slice and a reference
-implementation, not a production-ready product: no authentication or TLS, no persistence.
+**Status: v0.2.0 release candidate (MVP 2)** on top of v0.1.0 (MVP 1): OPC UA and Modbus TCP
+acquisition into one MQTT pipeline. A reference implementation, not a production-ready product:
+no authentication or TLS, no persistence. See [RELEASE_NOTES_v0.2.0.md](RELEASE_NOTES_v0.2.0.md).
 
 MVP 1 demonstrates a realistic OT-to-IT data path:
 
@@ -63,6 +64,20 @@ Not included in MVP 1:
 
 See [Roadmap](#roadmap).
 
+## MVP 2
+
+MVP 2 adds Modbus TCP as a second acquisition protocol without changing the MQTT output:
+
+- Common, protocol-neutral acquisition API (`IAcquisitionSource`); OPC UA and each Modbus TCP
+  device are sources of the same runtime, keyed by `(source_id, item_id)`
+- Modbus TCP polling on libmodbus 3.1.10: coils, discrete inputs, holding and input registers;
+  `bool`, `uint16`, `int16`, `uint32`, `int32`, `float32` with explicit word order and scaling
+- OPC UA-only, Modbus-only and mixed configurations (backward compatible with the v0.1.0 YAML)
+- Reconnection with bounded exponential backoff, per-source logs and diagnostics
+- Deterministic Modbus TCP simulator and a mixed Docker Compose demo (`compose.mvp2.yaml`)
+
+Still not included: Modbus RTU and writes, store-and-forward, TLS/mTLS, Sparkplug B, metrics.
+
 ## Example telemetry
 
 Captured from the demo (topic `industrial/site01/line01/oven01/temperature`):
@@ -109,6 +124,39 @@ Values change frequently for pressure, temperature and cycle time; production co
 machine states only change when the simulated equipment counts a part or changes state (see
 [docs/RUNBOOK.md](docs/RUNBOOK.md#5-verify-mqtt-output)).
 
+### MVP 2 mixed demo (OPC UA + Modbus TCP)
+
+`compose.mvp2.yaml` adds a deterministic Modbus TCP compressor simulator
+([modbus-simulator/](modbus-simulator/README.md)) and runs the gateway with
+[configs/gateway.mixed.example.yaml](configs/gateway.mixed.example.yaml): the seven OPC UA topics
+above plus eleven Modbus topics under `industrial/site01/line01/compressor01/`, through the same
+broker. It uses the same host ports as the MVP 1 demo, so stop one before starting the other.
+
+```bash
+docker compose down                                  # if the MVP 1 demo is running
+docker compose -f compose.mvp2.yaml up --build -d --wait
+docker compose -f compose.mvp2.yaml exec mosquitto mosquitto_sub -t 'industrial/#' -v
+docker compose -f compose.mvp2.yaml exec mosquitto \
+    mosquitto_sub -t 'industrial/site01/line01/compressor01/#' -v   # Modbus points only
+docker compose -f compose.mvp2.yaml down
+```
+
+Example output, captured from the demo:
+
+```text
+industrial/site01/line01/compressor01/outlet_pressure {"asset":"site01.line01.compressor01","tag":"outlet_pressure","value":74.5,"unit":"bar","quality":"GOOD","source_timestamp":null,"edge_timestamp":"2026-11-09T19:23:21.732Z","protocol":"modbus_tcp"}
+industrial/site01/line01/compressor01/running_time {"asset":"site01.line01.compressor01","tag":"running_time","value":100009,"unit":"s","quality":"GOOD","source_timestamp":null,"edge_timestamp":"2026-11-09T19:23:21.732Z","protocol":"modbus_tcp"}
+industrial/site01/line01/oven01/temperature {"asset":"site01.line01.oven01","tag":"temperature","value":65.0,"unit":"degC","quality":"GOOD","source_timestamp":"2026-11-09T19:23:20.796Z","edge_timestamp":"2026-11-09T19:23:21.743Z","protocol":"opcua"}
+```
+
+Modbus points carry `"protocol": "modbus_tcp"` and `"source_timestamp": null` (Modbus has no
+sample timestamps); they are polled every second, so they arrive continuously. See
+[docs/RUNBOOK.md](docs/RUNBOOK.md#17-mvp-2-mixed-demo-opc-ua--modbus-tcp).
+
+> Both demos are development environments, **not production security configurations**:
+> anonymous MQTT without TLS, OPC UA with security mode None, and Modbus TCP, which is plaintext
+> and unauthenticated by design. Host ports are bound to 127.0.0.1 only.
+
 ```bash
 docker compose logs -f edge-gateway   # gateway logs
 docker compose down                   # stop and remove the demo
@@ -127,12 +175,18 @@ GitHub Actions builds with GCC and Clang (Debug and Release, warnings as errors)
 - end-to-end tests of the gateway executable;
 - the Compose demo smoke test, which also restarts Mosquitto and the simulator and checks that
   the running gateway reconnects and resumes publishing;
+- the MVP 2 mixed Compose smoke test (`scripts/compose-mvp2-smoke-test.sh`): OPC UA and Modbus
+  topics, protocols, values and types, a Modbus-only restart without OPC UA interruption, a
+  Mosquitto restart and a clean SIGTERM shutdown;
+- the Modbus simulator's own tests;
 - clang-tidy, clang-format and the simulator's own tests.
 
 ## Roadmap
 
-Planned, not implemented in v0.1.0: Modbus TCP (MVP 2), SQLite store-and-forward (MVP 3),
-metrics and observability (MVP 4), ISA-95 asset modeling, TLS/mTLS and Sparkplug B. See
+Implemented: OPC UA → MQTT (v0.1.0, MVP 1) and Modbus TCP acquisition (v0.2.0, MVP 2; see
+[CHANGELOG.md](CHANGELOG.md) and [docs/MVP2_MODBUS_DESIGN.md](docs/MVP2_MODBUS_DESIGN.md)).
+Planned, not implemented: SQLite store-and-forward (MVP 3), metrics and observability (MVP 4),
+ISA-95 asset modeling, TLS/mTLS and Sparkplug B. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#8-planned-evolution-not-implemented).
 
 ## Engineering goals

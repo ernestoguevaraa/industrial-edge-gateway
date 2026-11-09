@@ -30,9 +30,10 @@ jobs:
 
       - name: Install build dependencies
         # libmbedtls-dev: required by the official open62541 amalgamation (see cmake/Dependencies.cmake).
+        # libmodbus-dev: libmodbus 3.1.10 for the Modbus TCP client (pinned by version check in CMake).
         # mosquitto: broker binary for the MQTT publisher integration tests.
         run: |
-          sudo apt-get update && sudo apt-get install -y ninja-build libmbedtls-dev mosquitto
+          sudo apt-get update && sudo apt-get install -y ninja-build libmbedtls-dev libmodbus-dev mosquitto
           echo "IEG_MOSQUITTO=/usr/sbin/mosquitto" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v7
@@ -80,6 +81,29 @@ jobs:
       - name: Build Docker image
         run: docker build -t plant-simulator:ci simulator
 
+  modbus-simulator:
+    name: modbus simulator (Python 3.12)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        # Standard library only at runtime; pytest for the tests.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e 'modbus-simulator[dev]'
+
+      - name: Test
+        working-directory: modbus-simulator
+        run: python -m pytest -v
+
+      - name: Build Docker image
+        run: docker build -t modbus-simulator:ci modbus-simulator
+
   compose-demo:
     name: Compose demo smoke test
     runs-on: ubuntu-24.04
@@ -91,6 +115,23 @@ jobs:
         # and payloads, restarts Mosquitto and the simulator to verify that the running gateway
         # recovers, and verifies a clean SIGTERM shutdown (scripts/compose-smoke-test.sh).
         run: scripts/compose-smoke-test.sh
+
+  compose-demo-mvp2:
+    name: Compose MVP 2 mixed demo smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Test smoke-test helpers
+        run: scripts/tests/output-contains-test.sh
+
+      - name: Run MVP 2 Compose smoke test
+        # OPC UA simulator + Modbus TCP simulator + gateway (configs/gateway.mixed.example.yaml)
+        # + Mosquitto (compose.mvp2.yaml): checks the 7 OPC UA and 11 Modbus topics, protocols,
+        # values, scales and types, restarts only the Modbus simulator (Modbus recovers, OPC UA
+        # keeps publishing), restarts Mosquitto (both recover) and verifies a clean SIGTERM
+        # shutdown (scripts/compose-mvp2-smoke-test.sh).
+        run: scripts/compose-mvp2-smoke-test.sh
 
   format:
     name: clang-format
@@ -111,7 +152,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy-18 libmbedtls-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy-18 libmbedtls-dev libmodbus-dev
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja
