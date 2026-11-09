@@ -8,6 +8,16 @@
   any number of Modbus TCP devices, all publishing through the same MQTT pipeline. Each device is
   a `ModbusTcpSource` with its own worker thread; Modbus points publish `"protocol": "modbus_tcp"`
   and `"source_timestamp": null`. OPC UA topics and payloads are unchanged from MVP 1.
+- **Reproducible mixed demo**: `compose.mvp2.yaml` (MVP 1 services reused via `extends`, plus a
+  Modbus TCP simulator) runs the gateway with `configs/gateway.mixed.example.yaml`.
+  `modbus-simulator/` is a deterministic Modbus TCP compressor (Python standard library only, own
+  image, never part of the gateway image): coils, discrete inputs, holding and input registers
+  with uint16, int16, uint32, int32 and float32 in both word orders, documented values and
+  periodic changes, real-read health check and clean SIGTERM shutdown.
+  `scripts/compose-mvp2-smoke-test.sh` (CI job `compose-demo-mvp2`) checks topics, protocols,
+  values and types of both sources, a Modbus-only restart without OPC UA interruption, a Mosquitto
+  restart and a clean SIGTERM shutdown; CI also runs the Modbus simulator tests. The MVP 1 demo
+  (`compose.yaml`) and its smoke test are unchanged.
 
 ### Changed
 
@@ -53,8 +63,8 @@
   waits and a joined, idempotent `stop()`.
 - `acquisition::Update::diagnostic`: a stable symbolic reason for Bad updates without a native
   status (e.g. `timeout`, `decode_non_finite_value`); empty for OPC UA.
-- `configs/gateway.mixed.example.yaml` documents a mixed OPC UA + Modbus TCP deployment (it needs
-  a Modbus TCP server; the Compose demo still runs the OPC UA-only example).
+- `configs/gateway.mixed.example.yaml` is the MVP 2 demo configuration: the seven MVP 1 OPC UA
+  nodes plus the Modbus simulator's eleven points (host `modbus-simulator`, port 5020, unit 1).
 
 ## v0.1.0 — MVP 1: OPC UA → MQTT vertical slice
 

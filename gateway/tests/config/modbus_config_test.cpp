@@ -175,36 +175,39 @@ TEST(MultiSourceConfig, LoadsTheMixedExampleFile)
 {
     const auto config = load_config_file(IEG_MIXED_EXAMPLE_CONFIG_PATH);
     ASSERT_TRUE(config.opcua.has_value());
-    EXPECT_THAT(config.assets, SizeIs(1));
+    EXPECT_THAT(config.assets, SizeIs(2)); // the seven MVP 1 OPC UA nodes
     ASSERT_THAT(config.modbus.devices, SizeIs(1));
     const auto& device = config.modbus.devices[0];
     EXPECT_EQ(device.source_id, "compressor-plc");
     EXPECT_EQ(device.host, "modbus-simulator");
-    EXPECT_EQ(device.port, 502);
+    EXPECT_EQ(device.port, 5020); // modbus-simulator/README.md
     EXPECT_EQ(device.unit_id, 1);
     EXPECT_EQ(device.poll_interval, std::chrono::milliseconds{1000});
     EXPECT_EQ(device.timeout, std::chrono::milliseconds{500});
-    ASSERT_THAT(device.points, SizeIs(5));
+    ASSERT_THAT(device.points, SizeIs(11));
 }
 
 TEST(MultiSourceConfig, MixedExamplePointsCoverEveryTableAndWordOrder)
 {
     const auto config = load_config_file(IEG_MIXED_EXAMPLE_CONFIG_PATH);
     const auto& points = config.modbus.devices.at(0).points;
-    ASSERT_THAT(points, SizeIs(5));
-    const ModbusPointConfig motor_current{.asset = "site01.line01.compressor01",
-                                          .tag = "motor_current",
-                                          .unit = "A",
-                                          .table = ModbusTable::HoldingRegisters,
-                                          .offset = 10,
-                                          .type = ModbusDataType::Float32,
-                                          .word_order = ModbusWordOrder::LowWordFirst,
-                                          .scale = std::nullopt};
-    EXPECT_EQ(points[4], motor_current);
+    ASSERT_THAT(points, SizeIs(11));
+    const ModbusPointConfig oil_temperature{.asset = "site01.line01.compressor01",
+                                            .tag = "oil_temperature",
+                                            .unit = "degC",
+                                            .table = ModbusTable::InputRegisters,
+                                            .offset = 2,
+                                            .type = ModbusDataType::Float32,
+                                            .word_order = ModbusWordOrder::LowWordFirst,
+                                            .scale = std::nullopt};
+    EXPECT_EQ(points[9], oil_temperature);
     EXPECT_EQ(points[0].table, ModbusTable::Coils);
-    EXPECT_EQ(points[1].scale, std::optional<double>{0.1});
-    EXPECT_EQ(points[2].type, ModbusDataType::Int16);
-    EXPECT_EQ(points[3].word_order, std::optional{ModbusWordOrder::HighWordFirst});
+    EXPECT_EQ(points[2].table, ModbusTable::DiscreteInputs);
+    EXPECT_EQ(points[4].scale, std::optional<double>{0.1});
+    EXPECT_EQ(points[5].type, ModbusDataType::Int16);
+    EXPECT_EQ(points[6].word_order, std::optional{ModbusWordOrder::HighWordFirst});
+    EXPECT_EQ(points[8].type, ModbusDataType::Int32);
+    EXPECT_EQ(points[10].type, ModbusDataType::UInt16);
 }
 
 TEST(MultiSourceConfig, ModbusOnlyConfigurationNeedsNoOpcUaSection)

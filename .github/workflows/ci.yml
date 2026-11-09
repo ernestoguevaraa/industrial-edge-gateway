@@ -81,6 +81,29 @@ jobs:
       - name: Build Docker image
         run: docker build -t plant-simulator:ci simulator
 
+  modbus-simulator:
+    name: modbus simulator (Python 3.12)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        # Standard library only at runtime; pytest for the tests.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e 'modbus-simulator[dev]'
+
+      - name: Test
+        working-directory: modbus-simulator
+        run: python -m pytest -v
+
+      - name: Build Docker image
+        run: docker build -t modbus-simulator:ci modbus-simulator
+
   compose-demo:
     name: Compose demo smoke test
     runs-on: ubuntu-24.04
@@ -92,6 +115,20 @@ jobs:
         # and payloads, restarts Mosquitto and the simulator to verify that the running gateway
         # recovers, and verifies a clean SIGTERM shutdown (scripts/compose-smoke-test.sh).
         run: scripts/compose-smoke-test.sh
+
+  compose-demo-mvp2:
+    name: Compose MVP 2 mixed demo smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run MVP 2 Compose smoke test
+        # OPC UA simulator + Modbus TCP simulator + gateway (configs/gateway.mixed.example.yaml)
+        # + Mosquitto (compose.mvp2.yaml): checks the 7 OPC UA and 11 Modbus topics, protocols,
+        # values, scales and types, restarts only the Modbus simulator (Modbus recovers, OPC UA
+        # keeps publishing), restarts Mosquitto (both recover) and verifies a clean SIGTERM
+        # shutdown (scripts/compose-mvp2-smoke-test.sh).
+        run: scripts/compose-mvp2-smoke-test.sh
 
   format:
     name: clang-format

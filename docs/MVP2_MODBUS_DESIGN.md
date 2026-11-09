@@ -1,6 +1,6 @@
 # MVP 2 — Modbus TCP acquisition design
 
-Status: Implemented through increment 2.7 — common ingress model (2.2), multi-source YAML (2.3), data decoder (2.4), Modbus TCP client (2.5), polling source (2.6) and the multi-source runtime (2.7); a Modbus simulator for the Compose demo and release work remain\
+Status: Implemented through increment 2.8 — common ingress model (2.2), multi-source YAML (2.3), data decoder (2.4), Modbus TCP client (2.5), polling source (2.6), multi-source runtime (2.7) and the reproducible mixed Compose demo (2.8); release work remains\
 Tracking: [Issue #1](https://github.com/ernestoguevaraa/industrial-edge-gateway/issues/1)
 
 ## Motivation
@@ -418,7 +418,7 @@ the state and detail strings; logging happens on the monitor thread.
 2. Backward-compatible YAML configuration; Modbus-only and mixed validation. *(Done: increment 2.3; the runtime still rejects Modbus devices.)*
 3. Modbus codec tests, then Modbus TCP polling/reconnection adapter. *(Codec: 2.4; transport client: 2.5; polling source: 2.6.)*
 4. Runtime multi-source lifecycle wiring and per-source diagnostics. *(Done: increment 2.7.)*
-5. Deterministic Modbus simulator, Compose demo, integration and E2E tests for mixed acquisition and recovery. *(Partly: integration and E2E tests with a deterministic in-process Modbus server done in 2.5–2.7; a Modbus simulator for the Compose demo is pending.)*
+5. Deterministic Modbus simulator, Compose demo, integration and E2E tests for mixed acquisition and recovery. *(Done: integration and E2E tests in 2.5–2.7; `modbus-simulator/`, `compose.mvp2.yaml` and the MVP 2 smoke test in 2.8.)*
 6. README, runbook, architecture and changelog updates; CI and release verification.
 
 ## Release acceptance

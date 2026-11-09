@@ -282,7 +282,7 @@ TEST(MakeGatewayRuntime, BuildsTheMixedExampleWithoutNetworkActivity)
     const auto runtime = make_gateway_runtime(config);
     ASSERT_NE(runtime, nullptr);
     const auto items = runtime->item_diagnostics();
-    EXPECT_EQ(items.size(), 2U + config.modbus.devices[0].points.size());
+    EXPECT_EQ(items.size(), 7U + config.modbus.devices[0].points.size()); // 7 OPC UA nodes
     EXPECT_EQ(items.back().protocol, "modbus_tcp");
 }
 

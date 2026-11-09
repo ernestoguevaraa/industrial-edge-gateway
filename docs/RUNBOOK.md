@@ -69,7 +69,8 @@ Containers reach each other by service name (`opc.tcp://plant-simulator:4840`,
 
 Startup order: the gateway waits until the simulator and the broker report healthy. This only
 avoids connection-failure noise at startup; the gateway reconnects to both on its own (see
-sections 10 and 11). If a host port is taken, see section 13.
+sections 10 and 11). If a host port is taken, see section 13. The MVP 2 mixed demo with a Modbus
+TCP simulator is described in section 17.
 
 ## 5. Verify MQTT Output
 
@@ -491,3 +492,78 @@ MVP 1 (v0.1.0) is complete: every criterion below is met.
 | integration test passes | CI `build-test` jobs |
 | GitHub Actions build is green | CI badge in `README.md` |
 | README and architecture documentation match actual behavior | `README.md`, `docs/ARCHITECTURE.md`, this runbook |
+
+## 17. MVP 2 Mixed Demo (OPC UA + Modbus TCP)
+
+`compose.mvp2.yaml` runs the MVP 1 services (reused unchanged from `compose.yaml`), a
+deterministic Modbus TCP compressor simulator (`modbus-simulator/`) and the gateway with
+`configs/gateway.mixed.example.yaml`. It uses the same host ports as the MVP 1 demo plus
+`127.0.0.1:5020` for Modbus TCP, so run one demo at a time.
+
+> Demo only, not a production security configuration: anonymous MQTT without TLS, OPC UA with
+> security mode None, and Modbus TCP, which is plaintext and unauthenticated by design.
+
+Start and observe:
+
+```bash
+docker compose down                                   # stop the MVP 1 demo if it runs
+docker compose -f compose.mvp2.yaml up --build -d --wait
+docker compose -f compose.mvp2.yaml ps
+docker compose -f compose.mvp2.yaml exec mosquitto mosquitto_sub -t 'industrial/#' -v
+docker compose -f compose.mvp2.yaml exec mosquitto \
+    mosquitto_sub -t 'industrial/site01/line01/compressor01/#' -v
+docker compose -f compose.mvp2.yaml logs -f edge-gateway modbus-simulator
+```
+
+| Service | Image | Host port | Purpose |
+|---|---|---|---|
+| `plant-simulator` | `ieg/plant-simulator:mvp1` | `127.0.0.1:4840` | OPC UA plant simulator |
+| `modbus-simulator` | `ieg/modbus-simulator:mvp2` (built from `modbus-simulator/`) | `127.0.0.1:5020` | Modbus TCP compressor, unit ID 1 |
+| `mosquitto` | `eclipse-mosquitto:2.0.22` | `127.0.0.1:1883` | MQTT broker |
+| `edge-gateway` | `ieg/edge-gateway:mvp1` | none | gateway with the mixed configuration |
+
+Expected topics: the seven OPC UA topics of section 5 and eleven Modbus topics under
+`industrial/site01/line01/compressor01/`: `running`, `maintenance_mode`, `door_closed`,
+`low_oil`, `outlet_pressure`, `suction_temperature`, `running_time`, `motor_current`,
+`pressure_delta`, `oil_temperature` and `cycle_count`. The Modbus values are documented in
+`modbus-simulator/README.md` (e.g. `suction_temperature` -12.5 from int16 -125 with scale 0.1,
+`pressure_delta` -3500 from an int32 in low-word-first order, `oil_temperature` 48.25 from a
+float32 in low-word-first order). The compressor runs for 50 s and stops for 10 s in a loop;
+while stopped, `running` is `false` and `outlet_pressure` and `motor_current` are `0.0`.
+
+Expected gateway lines after startup:
+
+```text
+info [runtime] event=started sources=2 mqtt_broker=mosquitto:1883 items=18 queue_capacity_points=10000 drain_timeout_ms=3000
+info [runtime] event=source_started source_id=opcua-main protocol=opcua target=opc.tcp://plant-simulator:4840 items=7
+info [runtime] event=source_started source_id=compressor-plc protocol=modbus_tcp target=modbus-simulator:5020 items=11
+info [runtime] event=connection_state component=modbus_tcp source_id=compressor-plc target=modbus-simulator:5020 state=Connected detail="" transitions=1
+info [runtime] event=connection_state component=mqtt target=mosquitto:1883 state=Connected detail="" transitions=1
+info [runtime] event=connection_state component=opcua source_id=opcua-main target=opc.tcp://plant-simulator:4840 state=Connected detail="" transitions=1
+```
+
+Failure tests:
+
+```bash
+docker compose -f compose.mvp2.yaml restart modbus-simulator   # Modbus only
+docker compose -f compose.mvp2.yaml restart mosquitto          # both protocols
+```
+
+After a Modbus simulator restart the gateway logs `component=modbus_tcp
+source_id=compressor-plc ... state=Disconnected` and then `state=Connected`, and Modbus topics
+resume within about a second of the simulator answering again; OPC UA topics keep publishing
+throughout. After a Mosquitto restart both protocols resume (section 11).
+
+Smoke test (also the CI job `compose-demo-mvp2`):
+
+```bash
+scripts/compose-mvp2-smoke-test.sh
+```
+
+It runs as Compose project `ieg-smoke-mvp2` with random loopback ports, checks the exact set of
+18 topics (no collision between sources), protocols, values, scales and JSON types,
+`"source_timestamp": null` for Modbus, a Modbus-only restart (Modbus recovers, the OPC UA oven
+temperature has no gap above 5 s), a Mosquitto restart (both protocols recover) and a SIGTERM
+shutdown with exit code 0. It prints the measured recovery times.
+
+Stop: `docker compose -f compose.mvp2.yaml down`.

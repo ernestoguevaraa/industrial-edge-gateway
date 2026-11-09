@@ -109,6 +109,39 @@ Values change frequently for pressure, temperature and cycle time; production co
 machine states only change when the simulated equipment counts a part or changes state (see
 [docs/RUNBOOK.md](docs/RUNBOOK.md#5-verify-mqtt-output)).
 
+### MVP 2 mixed demo (OPC UA + Modbus TCP)
+
+`compose.mvp2.yaml` adds a deterministic Modbus TCP compressor simulator
+([modbus-simulator/](modbus-simulator/README.md)) and runs the gateway with
+[configs/gateway.mixed.example.yaml](configs/gateway.mixed.example.yaml): the seven OPC UA topics
+above plus eleven Modbus topics under `industrial/site01/line01/compressor01/`, through the same
+broker. It uses the same host ports as the MVP 1 demo, so stop one before starting the other.
+
+```bash
+docker compose down                                  # if the MVP 1 demo is running
+docker compose -f compose.mvp2.yaml up --build -d --wait
+docker compose -f compose.mvp2.yaml exec mosquitto mosquitto_sub -t 'industrial/#' -v
+docker compose -f compose.mvp2.yaml exec mosquitto \
+    mosquitto_sub -t 'industrial/site01/line01/compressor01/#' -v   # Modbus points only
+docker compose -f compose.mvp2.yaml down
+```
+
+Example output, captured from the demo:
+
+```text
+industrial/site01/line01/compressor01/outlet_pressure {"asset":"site01.line01.compressor01","tag":"outlet_pressure","value":74.5,"unit":"bar","quality":"GOOD","source_timestamp":null,"edge_timestamp":"2026-11-09T19:23:21.732Z","protocol":"modbus_tcp"}
+industrial/site01/line01/compressor01/running_time {"asset":"site01.line01.compressor01","tag":"running_time","value":100009,"unit":"s","quality":"GOOD","source_timestamp":null,"edge_timestamp":"2026-11-09T19:23:21.732Z","protocol":"modbus_tcp"}
+industrial/site01/line01/oven01/temperature {"asset":"site01.line01.oven01","tag":"temperature","value":65.0,"unit":"degC","quality":"GOOD","source_timestamp":"2026-11-09T19:23:20.796Z","edge_timestamp":"2026-11-09T19:23:21.743Z","protocol":"opcua"}
+```
+
+Modbus points carry `"protocol": "modbus_tcp"` and `"source_timestamp": null` (Modbus has no
+sample timestamps); they are polled every second, so they arrive continuously. See
+[docs/RUNBOOK.md](docs/RUNBOOK.md#17-mvp-2-mixed-demo-opc-ua--modbus-tcp).
+
+> Both demos are development environments, **not production security configurations**:
+> anonymous MQTT without TLS, OPC UA with security mode None, and Modbus TCP, which is plaintext
+> and unauthenticated by design. Host ports are bound to 127.0.0.1 only.
+
 ```bash
 docker compose logs -f edge-gateway   # gateway logs
 docker compose down                   # stop and remove the demo
@@ -127,6 +160,10 @@ GitHub Actions builds with GCC and Clang (Debug and Release, warnings as errors)
 - end-to-end tests of the gateway executable;
 - the Compose demo smoke test, which also restarts Mosquitto and the simulator and checks that
   the running gateway reconnects and resumes publishing;
+- the MVP 2 mixed Compose smoke test (`scripts/compose-mvp2-smoke-test.sh`): OPC UA and Modbus
+  topics, protocols, values and types, a Modbus-only restart without OPC UA interruption, a
+  Mosquitto restart and a clean SIGTERM shutdown;
+- the Modbus simulator's own tests;
 - clang-tidy, clang-format and the simulator's own tests.
 
 ## Roadmap

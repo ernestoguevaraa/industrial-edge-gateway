@@ -1,0 +1,56 @@
+# MVP 2 demo stack: OPC UA plant simulator + Modbus TCP compressor simulator -> C++20 edge
+# gateway (mixed configuration) -> Eclipse Mosquitto.
+#
+# The MVP 1 services are reused unchanged from compose.yaml (extends); only the gateway's
+# configuration (configs/gateway.mixed.example.yaml) and its dependencies differ. compose.yaml
+# remains the MVP 1 (OPC UA-only) demo.
+#
+# DEMO ONLY, not a production security configuration: anonymous MQTT without TLS, OPC UA with
+# security mode None, and Modbus TCP, which is plaintext and unauthenticated by design. Host
+# ports are published on 127.0.0.1 only. The MVP 1 and MVP 2 demos use the same default host
+# ports, so run one at a time (or set IEG_*_HOST_PORT).
+#
+#   docker compose -f compose.mvp2.yaml up --build -d --wait
+#   docker compose -f compose.mvp2.yaml exec mosquitto mosquitto_sub -t 'industrial/#' -v
+#   docker compose -f compose.mvp2.yaml down
+name: industrial-edge-gateway-mvp2
+
+services:
+  plant-simulator:
+    extends:
+      file: compose.yaml
+      service: plant-simulator
+
+  mosquitto:
+    extends:
+      file: compose.yaml
+      service: mosquitto
+
+  modbus-simulator:
+    build: ./modbus-simulator
+    image: ieg/modbus-simulator:mvp2
+    ports:
+      - "127.0.0.1:${IEG_MODBUS_HOST_PORT:-5020}:5020" # optional: read with any Modbus TCP client
+    healthcheck:
+      # Test inherited from the image (a real FC03 read); only the timing is tuned here.
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  edge-gateway:
+    extends:
+      file: compose.yaml
+      service: edge-gateway
+    volumes:
+      # Replaces the MVP 1 configuration mounted at the same path.
+      - ./configs/gateway.mixed.example.yaml:/etc/ieg/gateway.yaml:ro
+    depends_on:
+      # Only reduces startup noise: the gateway reconnects to every service on its own.
+      plant-simulator:
+        condition: service_healthy
+      modbus-simulator:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy

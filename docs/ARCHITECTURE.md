@@ -402,11 +402,19 @@ The Compose smoke test (`scripts/compose-smoke-test.sh`) checks the same on the 
 demo, restarts Mosquitto and the simulator to verify that the running gateway reconnects and
 resumes publishing, and verifies a clean SIGTERM shutdown.
 
+The MVP 2 smoke test (`scripts/compose-mvp2-smoke-test.sh`) runs `compose.mvp2.yaml`: the OPC UA
+simulator, the deterministic Modbus TCP simulator (`modbus-simulator/`, its own image) and the
+gateway with the mixed configuration. It checks the exact topic set of both sources, protocols,
+Modbus values, scales and JSON types (`"source_timestamp": null`), that restarting only the
+Modbus simulator does not interrupt OPC UA publishing, recovery of both protocols after a
+Mosquitto restart, and a clean SIGTERM shutdown.
+
 ## 7. Security
 
 MVP 1 uses local anonymous OPC UA (security mode None) and unauthenticated MQTT for development
 convenience. Modbus TCP has no security at all (plaintext, no authentication); use it only on
-isolated networks. The Compose demo publishes its ports on 127.0.0.1 only.
+isolated networks. The MVP 2 demo (`compose.mvp2.yaml`, Modbus simulator) inherits all of this and
+is likewise not a production security configuration. The Compose demo publishes its ports on 127.0.0.1 only.
 
 This is explicitly not a production security configuration.
 

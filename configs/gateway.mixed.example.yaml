@@ -1,11 +1,13 @@
-# Mixed OPC UA + Modbus TCP configuration (MVP 2).
+# Mixed OPC UA + Modbus TCP configuration (MVP 2 demo, compose.mvp2.yaml).
 #
-# The gateway runs one OPC UA source and one Modbus TCP source per device, all publishing
-# through the same MQTT pipeline (Modbus points with "protocol": "modbus_tcp"). This file expects
-# an OPC UA server at plant-simulator:4840 and a Modbus TCP server at modbus-simulator:502; the
-# Compose demo provides only the OPC UA simulator, so adapt the Modbus host for your environment.
-# configs/gateway.example.yaml remains the OPC UA-only demo configuration.
-# Modbus TCP is plaintext and unauthenticated; use it only on isolated networks.
+# The gateway runs one OPC UA source and one Modbus TCP source per device, all publishing through
+# the same MQTT pipeline (Modbus points with "protocol": "modbus_tcp" and no source timestamp).
+# OPC UA: the plant simulator, exactly the MVP 1 nodes of configs/gateway.example.yaml.
+# Modbus TCP: the deterministic compressor simulator (modbus-simulator/README.md documents the
+# register map and the values these points read).
+#
+# DEMO ONLY, not a production security configuration: anonymous OPC UA without encryption,
+# anonymous MQTT without TLS, and Modbus TCP, which is plaintext and unauthenticated by design.
 #
 # Modbus conventions (docs/MVP2_MODBUS_DESIGN.md):
 #  - offset is the ZERO-BASED PDU address in its table: holding register "40001" is
@@ -38,16 +40,35 @@ assets:
       - node_id: "ns=2;s=Line01.Press01.Pressure"
         tag: "pressure"
         unit: "bar"
+      - node_id: "ns=2;s=Line01.Press01.CycleTime"
+        tag: "cycle_time"
+        unit: "s"
+      - node_id: "ns=2;s=Line01.Press01.ProductionCount"
+        tag: "production_count"
+        unit: "units"
+
+  - asset: "site01.line01.oven01"
+    nodes:
+      - node_id: "ns=2;s=Line01.Oven01.State"
+        tag: "state"
+        unit: ""
+      - node_id: "ns=2;s=Line01.Oven01.Temperature"
+        tag: "temperature"
+        unit: "degC"
+      - node_id: "ns=2;s=Line01.Oven01.ProductionCount"
+        tag: "production_count"
+        unit: "units"
 
 modbus:
   devices:
     - source_id: "compressor-plc"   # unique; "opcua-main" is reserved
       host: "modbus-simulator"
-      port: 502                     # optional, default 502
+      port: 5020                    # the simulator's unprivileged port (default would be 502)
       unit_id: 1                    # 1..255
       poll_interval_ms: 1000        # optional, default 1000 (100..3600000)
       timeout_ms: 500               # optional, default 1000 (10..60000, <= poll_interval_ms)
       points:
+        # Coils (FC01): one request for offsets 0..1.
         - asset: "site01.line01.compressor01"
           tag: "running"
           unit: ""
@@ -55,30 +76,71 @@ modbus:
           offset: 0
           type: bool
         - asset: "site01.line01.compressor01"
+          tag: "maintenance_mode"
+          unit: ""
+          table: coils
+          offset: 1
+          type: bool
+        # Discrete inputs (FC02): one request for offsets 0..1.
+        - asset: "site01.line01.compressor01"
+          tag: "door_closed"
+          unit: ""
+          table: discrete_inputs
+          offset: 0
+          type: bool
+        - asset: "site01.line01.compressor01"
+          tag: "low_oil"
+          unit: ""
+          table: discrete_inputs
+          offset: 1
+          type: bool
+        # Holding registers (FC03): one request for offsets 0..5.
+        - asset: "site01.line01.compressor01"
           tag: "outlet_pressure"
           unit: "bar"
           table: holding_registers
-          offset: 0                 # 40001
+          offset: 0                 # 40001; raw 700..745 -> 70.0..74.5 bar
           type: uint16
-          scale: 0.1                # raw 75 -> 7.5 bar
+          scale: 0.1
         - asset: "site01.line01.compressor01"
-          tag: "ambient_temperature"
+          tag: "suction_temperature"
           unit: "degC"
-          table: input_registers
-          offset: 0                 # 30001
+          table: holding_registers
+          offset: 1                 # 40002; raw -125 -> -12.5 degC
           type: int16
           scale: 0.1
         - asset: "site01.line01.compressor01"
-          tag: "run_hours"
-          unit: "h"
-          table: input_registers
-          offset: 1                 # 30002..30003
+          tag: "running_time"
+          unit: "s"
+          table: holding_registers
+          offset: 2                 # 40003..40004
           type: uint32
           word_order: high_word_first
         - asset: "site01.line01.compressor01"
           tag: "motor_current"
           unit: "A"
           table: holding_registers
-          offset: 10                # 40011..40012
+          offset: 4                 # 40005..40006
+          type: float32
+          word_order: high_word_first
+        # Input registers (FC04): one request for offsets 0..4.
+        - asset: "site01.line01.compressor01"
+          tag: "pressure_delta"
+          unit: "Pa"
+          table: input_registers
+          offset: 0                 # 30001..30002
+          type: int32
+          word_order: low_word_first
+        - asset: "site01.line01.compressor01"
+          tag: "oil_temperature"
+          unit: "degC"
+          table: input_registers
+          offset: 2                 # 30003..30004
           type: float32
           word_order: low_word_first
+        - asset: "site01.line01.compressor01"
+          tag: "cycle_count"
+          unit: ""
+          table: input_registers
+          offset: 4                 # 30005
+          type: uint16
