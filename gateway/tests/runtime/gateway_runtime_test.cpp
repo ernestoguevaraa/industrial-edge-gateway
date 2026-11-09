@@ -256,8 +256,9 @@ private:
 {
     if (actual.asset != expected.asset || actual.tag != expected.tag ||
         actual.source_id != expected.source_id || actual.locator != expected.locator ||
-        actual.no_value != expected.no_value ||
-        actual.last_no_value_status != expected.last_no_value_status) {
+        actual.no_value != expected.no_value || actual.protocol != expected.protocol ||
+        actual.last_no_value_status != expected.last_no_value_status ||
+        actual.last_no_value_diagnostic != expected.last_no_value_diagnostic) {
         return ::testing::AssertionFailure() << "item diagnostics differ";
     }
     return ::testing::AssertionSuccess();
@@ -331,7 +332,7 @@ TEST(GatewayRuntime, RejectsMissingSourceOrSourceWithoutId)
         std::make_unique<NiceMock<acquisition::testing::MockAcquisitionSource>>("")));
 }
 
-TEST(GatewayRuntime, RejectsConfiguredModbusDevicesInsteadOfIgnoringThem)
+TEST(GatewayRuntime, RejectsAConfiguredSourceThatIsNotProvided)
 {
     config::ModbusPointConfig point;
     point.asset = "site01.line01.press02";
@@ -407,9 +408,11 @@ TEST(GatewayRuntime, NoValueChangeIsCountedWithStatusAndNeverPublished)
     const ItemDiagnostics expected_state{.asset = "site01.line01.press01",
                                          .tag = "state",
                                          .source_id = kSourceId,
+                                         .protocol = "opcua",
                                          .locator = "ns=2;s=Line01.Press01.State",
                                          .no_value = 1,
-                                         .last_no_value_status = kBadNodeIdUnknown};
+                                         .last_no_value_status = kBadNodeIdUnknown,
+                                         .last_no_value_diagnostic = ""};
     EXPECT_TRUE(same_diagnostics(items[1], expected_state));
     EXPECT_EQ(items[0].no_value, 0U);
     EXPECT_FALSE(items[0].last_no_value_status.has_value());
@@ -433,7 +436,7 @@ TEST(GatewayRuntime, UpdatesForAnotherSourceOrUnknownItemAreCountedAndDropped)
     harness.runtime().start();
     harness.publisher_state(output::PublisherState::Connected);
     auto foreign = change(0, 1.0);
-    foreign.source_id = "modbus-press01"; // (source_id, item_id) was never requested
+    foreign.source_id = "modbus-press01"; // a source the runtime does not know
     harness.fire(foreign);
     harness.fire(change(42, 1.0));
     harness.fire(change(0, 2.0));
@@ -442,7 +445,8 @@ TEST(GatewayRuntime, UpdatesForAnotherSourceOrUnknownItemAreCountedAndDropped)
     EXPECT_EQ(harness.recorder().count(), 1U);
     EXPECT_EQ(harness.recorder().points().front().value, domain::TelemetryValue{2.0});
     const auto stats = harness.runtime().stats();
-    EXPECT_EQ(stats.unknown_item, 2U);
+    EXPECT_EQ(stats.unknown_item, 1U);   // item 42 was never requested from opcua-main
+    EXPECT_EQ(stats.unknown_source, 1U); // modbus-press01 is not a configured source
     EXPECT_EQ(stats.received, 3U);
 }
 

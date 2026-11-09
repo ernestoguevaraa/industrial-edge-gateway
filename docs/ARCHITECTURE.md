@@ -1,21 +1,21 @@
-# Architecture — MVP 1 (with the MVP 2 acquisition API)
+# Architecture — MVP 1 + MVP 2 (OPC UA and Modbus TCP)
 
 ## 1. Scope
 
-MVP 1 implements the minimum complete OT-to-IT data path:
+MVP 1 implements the minimum complete OT-to-IT data path; MVP 2 adds Modbus TCP devices as
+further acquisition sources of the same pipeline:
 
 ```text
-Python OPC UA Simulator
-        |
-        | OPC UA subscriptions
-        v
-Open62541Client  (IOpcUaClient)
-        |
-        | opcua::DataChange (SDK-neutral, raw StatusCode)
-        v
-OpcUaSource      (IAcquisitionSource "opcua-main")
-        |
-        | acquisition::Update (protocol-neutral, native status)
+OPC UA server                         Modbus TCP device(s)
+        |                                     |
+        | OPC UA subscriptions                | polled reads (FC01-FC04)
+        v                                     v
+Open62541Client  (IOpcUaClient)       LibModbusClient (IModbusClient) + decoder
+        |                                     |
+        v                                     v
+OpcUaSource "opcua-main"              ModbusTcpSource "<source_id>" (one per device)
+        |                                     |
+        +---- acquisition::Update (protocol-neutral, keyed by source_id + item_id)
         v
 Gateway Runtime  (mapping, edge timestamp, bounded queue)
         |
@@ -31,9 +31,9 @@ Mosquitto
 The architecture deliberately separates protocol-specific code from the internal telemetry model:
 the runtime depends only on the protocol-neutral `IAcquisitionSource` and `ITelemetryPublisher`
 interfaces, and no open62541, OPC UA client or Paho type appears in its public header. The OPC UA
-client is wrapped by the `OpcUaSource` bridge, which `make_gateway_runtime()` builds; this is the
-first MVP 2 increment (common acquisition API) and prepares additional protocols such as Modbus
-TCP without changing the runtime again.
+client is wrapped by the `OpcUaSource` bridge and each Modbus device by a `ModbusTcpSource`;
+`make_gateway_runtime()` builds one source per configured source (OPC UA-only, Modbus-only and
+mixed deployments).
 
 ## 2. Components
 
@@ -113,7 +113,9 @@ server's Good code while quality is Bad), and maps connection states one to one.
 and callback quiescence are provided by `Open62541Client`. If the client's `start()` fails
 unexpectedly the bridge stops the client at once; a rejected request leaves it startable.
 
-The MVP 1 YAML schema configures exactly one OPC UA source, with source ID `opcua-main`.
+The `opcua` section configures at most one OPC UA source, with source ID `opcua-main`; each
+`modbus.devices` entry is one `ModbusTcpSource` with its own `source_id` (see
+`docs/MVP2_MODBUS_DESIGN.md`).
 
 ### 2.4 Domain Model
 
@@ -154,7 +156,7 @@ Implementation: `GatewayRuntime`.
 
 Responsibilities:
 
-- Own the lifecycle of the acquisition source and the publisher
+- Own the lifecycle of the acquisition sources and the publisher
 - Receive normalized `acquisition::Update`s
 - Apply asset/tag/unit metadata from the configuration
 - Add the edge timestamp (taken when the update is received, before it is queued)
@@ -164,10 +166,21 @@ Responsibilities:
 The source data callback only maps, timestamps and pushes into a bounded in-memory queue; it never
 performs network I/O or logging. A single consumer thread takes points from the queue and
 publishes them. An update that carries no value is not turned into a `TelemetryPoint`; it is
-counted per item together with its most recent native status (`event=no_value_updates ...
-last_status=0x80340000`). Updates for a `(source_id, item_id)` the runtime never requested are
-counted as `unknown_item` and dropped. Quality is never normalized: UNCERTAIN and BAD values are
-published as such. `TelemetryPoint::protocol` comes from the item binding (`opcua`).
+counted per item together with its most recent native status and diagnostic
+(`event=no_value_updates ... last_status=0x80340000`). Items are keyed by `(source_id, item_id)`:
+item IDs are unique per source only (OPC UA keeps its MVP 1 configuration-order IDs), lookups go
+through an immutable table (hash of the source ID, then an index), and updates from an unknown
+source (`unknown_source`) or for an item a source was not asked for (`unknown_item`) are counted
+and never published. Quality is never normalized: UNCERTAIN and BAD values are published as such.
+`TelemetryPoint::protocol` comes from the item binding (`opcua` or `modbus_tcp`); Modbus points
+have no source timestamp (`"source_timestamp": null`).
+
+Callbacks of different sources run concurrently on their own threads; the data path uses only
+the immutable item table, atomic counters, a per-item lock for the last diagnostic (never shared
+between sources) and the queue's short critical section, so one source never blocks another.
+Connection states are logged per source: `event=connection_state component=<protocol>
+source_id=<id> target=<endpoint> state=...` (the MVP 1 `component=opcua` and `component=mqtt`
+lines keep their form).
 
 The queue holds up to `runtime.queue_capacity` telemetry points (default 10000) and drops the
 oldest point when full. While the MQTT connection is down the consumer stops taking points, so
@@ -246,22 +259,27 @@ least one Modbus TCP device is configured under `modbus.devices`, source IDs are
 `(asset, tag)` is unique across all sources. The schema, its validation rules and the Modbus data
 convention (zero-based offsets, big-endian bytes, explicit word order for 32-bit types) are
 documented in `docs/MVP2_MODBUS_DESIGN.md`; `configs/gateway.mixed.example.yaml` is a mixed
-example. Modbus TCP acquisition is not implemented yet, so the runtime rejects any configured
-Modbus device at startup (exit code 2) rather than running only the OPC UA part.
+example.
 
 ## 3. Threading Model
 
 Implemented model:
 
 ```text
-OPC UA worker thread (open62541 client -> OpcUaSource)
-        |  source callback: map + edge timestamp + try_push (no I/O)
-        v
+OPC UA worker thread          Modbus worker thread per device (ModbusTcpSource)
+(open62541 -> OpcUaSource)    (LibModbusClient, sequential polling, decoder)
+        |                             |
+        |  source callbacks (concurrent across sources):
+        |  map + edge timestamp + try_push (no I/O)
+        v                             v
 bounded telemetry queue
         |
         v
 single publishing (consumer) thread  --->  MqttPublisher (Paho)
 ```
+
+Each Modbus device has one worker thread (`ModbusTcpSource`) that owns its client, polls
+sequentially and invokes that source's callbacks; the OPC UA client has its own worker thread.
 
 Additional threads: the MQTT publisher's connection worker, Paho's internal threads, a monitor
 thread that performs all connection-transition and summary logging outside the adapter
@@ -276,11 +294,14 @@ Rationale:
 
 No thread-per-tag design.
 
-Shutdown is bounded and ordered: stop the acquisition source (producers; `OpcUaSource` stops the
-OPC UA client) → close the queue → let the consumer drain until it finishes or the drain timeout
-passes (then the publisher is stopped to interrupt a blocked publish) → stop the publisher → join
-all threads. Start runs in the reverse order (publisher and consumer before the source); if the
-source's `start()` throws, the source is still stopped before the publisher.
+Shutdown is bounded and ordered: stop all acquisition sources (producers, concurrently, so the
+slowest source bounds the wait; each closes its own client on its own thread) → close the queue →
+let the consumer drain until it finishes or the drain timeout passes (then the publisher is
+stopped to interrupt a blocked publish) → stop the publisher → join all threads. Start runs in the
+reverse order (publisher and consumer before the sources, then the sources one by one); if any
+source's `start()` throws, every source whose start was attempted is stopped before the queue is
+closed and the publisher stopped. A Modbus source may need up to one request timeout
+(`timeout_ms`) to stop, or one connect attempt (plus unbounded DNS resolution for host names).
 
 ## 4. Error Handling
 
@@ -295,7 +316,7 @@ Examples:
 - duplicated asset/tag
 - unsupported value (e.g. MQTT QoS other than 1 in MVP 1)
 - missing OPC UA endpoint
-- no acquisition source, or Modbus devices configured (not supported by the runtime yet)
+- no acquisition source configured
 
 ### Connectivity errors
 Non-fatal at startup and afterwards.
@@ -340,7 +361,9 @@ transitions and a periodic summary (delivered, dropped and failed counts, queue 
 - The acquisition contract on `OpcUaSource` (mapping, native status, lifecycle and start
   failures), and the runtime wired to the real `OpcUaSource` over a mocked OPC UA client
 - Multi-source configuration (Modbus schema validation) and the transport-independent Modbus data
-  decoder (`ieg::modbus::decode`; not yet used by the runtime)
+  decoder (`ieg::modbus::decode`)
+- The multi-source runtime with mock sources: routing by `(source_id, item_id)`, unknown sources,
+  partial start failures, concurrent shutdown, concurrent callbacks, per-item diagnostics
 - The Modbus TCP client (`LibModbusClient`, libmodbus 3.1.10) against a deterministic in-process
   Modbus TCP server, and a scripted `FakeModbusClient` for future poller tests
 - The Modbus TCP acquisition source (`ModbusTcpSource`: read grouping, polling schedule,
@@ -370,6 +393,11 @@ that:
 7. Edge timestamps exist.
 8. Quality is valid.
 
+With a deterministic in-process Modbus TCP server next to the simulator, further tests run a
+mixed OPC UA + Modbus configuration (unchanged OPC UA topics and payloads, Modbus payloads with
+`"protocol": "modbus_tcp"` and `"source_timestamp": null`, recovery after a Modbus outage in the
+same gateway process) and a Modbus-only configuration.
+
 The Compose smoke test (`scripts/compose-smoke-test.sh`) checks the same on the Docker Compose
 demo, restarts Mosquitto and the simulator to verify that the running gateway reconnects and
 resumes publishing, and verifies a clean SIGTERM shutdown.
@@ -377,7 +405,8 @@ resumes publishing, and verifies a clean SIGTERM shutdown.
 ## 7. Security
 
 MVP 1 uses local anonymous OPC UA (security mode None) and unauthenticated MQTT for development
-convenience. The Compose demo publishes its ports on 127.0.0.1 only.
+convenience. Modbus TCP has no security at all (plaintext, no authentication); use it only on
+isolated networks. The Compose demo publishes its ports on 127.0.0.1 only.
 
 This is explicitly not a production security configuration.
 
@@ -387,8 +416,8 @@ TLS, certificates and mTLS are planned for a later milestone.
 
 ```text
 MVP 1  OPC UA -> MQTT                      (v0.1.0, implemented)
-MVP 2  Modbus + common acquisition model   (in progress: acquisition API, config, decoder,
-                                            TCP client, polling source done; runtime pending)
+MVP 2  Modbus + common acquisition model   (implemented, unreleased: acquisition API, config,
+                                            decoder, TCP client, polling, multi-source runtime)
 MVP 3  SQLite store-and-forward
 MVP 4  metrics / observability
 v1.0   ISA-95 asset modeling + failure scenarios

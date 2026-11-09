@@ -2,6 +2,13 @@
 
 ## Unreleased — MVP 2 (in progress)
 
+### Added
+
+- **Modbus TCP acquisition in the gateway**: OPC UA-only, Modbus-only and mixed deployments with
+  any number of Modbus TCP devices, all publishing through the same MQTT pipeline. Each device is
+  a `ModbusTcpSource` with its own worker thread; Modbus points publish `"protocol": "modbus_tcp"`
+  and `"source_timestamp": null`. OPC UA topics and payloads are unchanged from MVP 1.
+
 ### Changed
 
 - `GatewayRuntime` consumes the SDK-neutral `ieg::acquisition::IAcquisitionSource` instead of
@@ -11,7 +18,18 @@
 - `acquisition::Update` carries the raw protocol status as `native_status` (an integer) instead
   of a decimal string; `ItemDiagnostics` reports `source_id`, `locator` and a protocol-neutral
   `last_no_value_status`.
-- The `event=started` log line also reports `source_id`.
+- `GatewayRuntime` owns several acquisition sources keyed by `(source_id, item_id)` (OPC UA keeps
+  its MVP 1 item IDs); `make_gateway_runtime()` builds the OPC UA source and one Modbus source per
+  device. Sources start after the publisher; a partial start failure stops every attempted
+  source; shutdown stops all sources concurrently before the queue closes. Updates from unknown
+  sources are never published (`RuntimeStats::unknown_source`). `validate_for_mvp1()` is renamed
+  `validate_runtime_config()` and only enforces MQTT QoS 1.
+- Logs: `event=started sources=<n> ...` plus `event=source_started` per source;
+  `event=connection_state component=<protocol> source_id=<id> target=...` per source
+  (`component=opcua`/`component=mqtt` keep their form); `event=no_value_updates` carries
+  `source_id` and `diagnostic` (OPC UA keeps `node_id`). `ItemDiagnostics` adds `protocol` and
+  `last_no_value_diagnostic`.
+- The gateway executable links libmodbus (shared); the runtime image installs `libmodbus5`.
 - Configuration: `opcua` and `assets` are optional when Modbus TCP devices are configured under
   the new optional `modbus.devices` section (source ID, host, port, unit ID, poll interval,
   timeout and points with table, zero-based offset, type, word order and scale). The loader
@@ -22,24 +40,21 @@
   `gateway_modbus_decoder`): bool from coils/discrete inputs, uint16/int16, uint32/int32 and
   float32 with explicit word order, optional scale, and an explicit `DecodeResult`/`DecodeError`
   policy (insufficient data, table/type mismatch, invalid word order or scale, non-finite values).
-  Not yet used by the runtime.
 - Modbus TCP client: SDK-neutral `IModbusClient` (connect, read bits/registers into caller
   buffers as `BitBlock`/`RegisterBlock`, close) and `LibModbusClient` on libmodbus 3.1.10 (Ubuntu
   24.04 `libmodbus-dev`, exact version checked by CMake). Single owner thread, no internal threads,
   no retries; typed errors (connection failed/lost, timeout, Modbus exception code, protocol
   error) with the native `errno` or exception code; protocol request limits validated before I/O.
-  Not yet used by the runtime; the gateway executable does not link libmodbus. Build
-  prerequisite: `libmodbus-dev`.
+  Build prerequisite: `libmodbus-dev`.
 - Modbus TCP acquisition source `ModbusTcpSource` (`IAcquisitionSource` for one device): one
   owner thread per device, sequential requests, read grouping of contiguous points without gaps
   (split into single-point reads after a Modbus exception), fixed-rate polling that skips missed
   slots on overrun, bounded exponential reconnect backoff with seedable jitter, interruptible
-  waits and a joined, idempotent `stop()`. Not yet created by the runtime.
+  waits and a joined, idempotent `stop()`.
 - `acquisition::Update::diagnostic`: a stable symbolic reason for Bad updates without a native
   status (e.g. `timeout`, `decode_non_finite_value`); empty for OPC UA.
-- `configs/gateway.mixed.example.yaml` documents a mixed OPC UA + Modbus TCP deployment. Modbus
-  TCP acquisition is **not implemented yet**: the gateway rejects configured Modbus devices at
-  startup with exit code 2. The MVP 1 example and Compose demo are unchanged.
+- `configs/gateway.mixed.example.yaml` documents a mixed OPC UA + Modbus TCP deployment (it needs
+  a Modbus TCP server; the Compose demo still runs the OPC UA-only example).
 
 ## v0.1.0 — MVP 1: OPC UA → MQTT vertical slice
 

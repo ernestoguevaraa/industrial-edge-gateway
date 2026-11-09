@@ -238,10 +238,10 @@ Expected gateway behavior (observed log events, abbreviated):
 
 ```text
 warning [opcua] event=connection_lost ... reason="secure channel closed" retry_in_ms=500
-warning [runtime] event=connection_state component=opcua ... state=Disconnected ...
+warning [runtime] event=connection_state component=opcua source_id=opcua-main ... state=Disconnected ...
 warning [opcua] event=connect_failed ... reason="BadConnectionRejected" retry_in_ms=1000
 info    [opcua] event=connected ... items=7 failed_items=0
-info    [runtime] event=connection_state component=opcua ... state=Connected ...
+info    [runtime] event=connection_state component=opcua source_id=opcua-main ... state=Connected ...
 ```
 
 The gateway keeps running, retries with exponential backoff (up to 30 s), recreates the session,
@@ -311,7 +311,8 @@ level. Expected gateway lines after startup:
 ```text
 info [mqtt] event=starting broker=tcp://mosquitto:1883 client_id=ieg-gateway-01
 info [opcua] event=starting endpoint=opc.tcp://plant-simulator:4840 items=7
-info [runtime] event=started opcua_endpoint=opc.tcp://plant-simulator:4840 mqtt_broker=mosquitto:1883 items=7 queue_capacity_points=10000 drain_timeout_ms=3000
+info [runtime] event=started sources=1 mqtt_broker=mosquitto:1883 items=7 queue_capacity_points=10000 drain_timeout_ms=3000
+info [runtime] event=source_started source_id=opcua-main protocol=opcua target=opc.tcp://plant-simulator:4840 items=7
 info [mqtt] event=connected broker=tcp://mosquitto:1883 client_id=ieg-gateway-01
 info [opcua] event=connected endpoint=opc.tcp://plant-simulator:4840 publishing_interval_ms=1000 items=7 failed_items=0
 ```
@@ -370,7 +371,8 @@ Remember that state and counter topics change rarely (section 5).
 
 Compare `configs/gateway.example.yaml` against the simulator node definitions. A node that does
 not exist on the server is reported in the gateway log (`event=item_create_failed`) and in the
-periodic `event=no_value_updates` line with its NodeId and status code.
+periodic `event=no_value_updates source_id=opcua-main ... node_id=... last_status=0x80340000` line
+with its NodeId and status code.
 
 ### Gateway exits at startup
 
@@ -385,13 +387,36 @@ Exit code 2 means the configuration was rejected; every problem is logged
 - invalid YAML
 - missing mandatory configuration
 - duplicate asset/tag definition
-- unsupported configuration value (e.g. `mqtt.qos` other than 1 in MVP 1)
-- a `modbus` section (e.g. `configs/gateway.mixed.example.yaml`): the MVP 2 Modbus schema is
-  validated, but Modbus TCP acquisition is not implemented yet, so the gateway logs
-  `Modbus TCP acquisition is not implemented yet` and exits with code 2
+- unsupported configuration value (e.g. `mqtt.qos` other than 1)
+- invalid Modbus device or point settings (see `docs/MVP2_MODBUS_DESIGN.md`)
 
 Exit code 1 means a component failed to start (`event=start_failed`). Configuration failures are
 intentionally fatal.
+
+### Modbus TCP device not delivering data
+
+A Modbus device is a source of its own (`source_id` from the configuration). Its connection state
+is logged per source, e.g.
+
+```text
+warning [runtime] event=connection_state component=modbus_tcp source_id=press-plc target=10.0.0.5:502 state=Disconnected detail="connection_failed: connect failed: Connection refused" transitions=1
+info    [runtime] event=connection_state component=modbus_tcp source_id=press-plc target=10.0.0.5:502 state=Connected detail="" transitions=1
+```
+
+The source reconnects with exponential backoff (0.5 s up to 30 s, with jitter). Typical details:
+`connection_failed: ...` (host/port/firewall), `timeout: ...` (no complete answer within
+`timeout_ms`, wrong unit ID on a gateway, overloaded device) and `protocol_error: ...`. Points
+that could not be read are not published; they appear in the periodic
+`event=no_value_updates source_id=... locator=<asset>/<tag> ... last_status=... diagnostic="..."`
+line. `last_status` is a Modbus exception code (e.g. `0x00000002` Illegal Data Address: the
+`offset` does not exist on the device; remember offsets are zero-based) and `diagnostic` is
+`modbus_exception`, `timeout`, `connection_lost`, `protocol_error` or `decode_<reason>` (e.g.
+`decode_non_finite_value` for a float32 NaN). Modbus points never have a source timestamp
+(`"source_timestamp": null` in the payload); `edge_timestamp` is the gateway receipt time.
+
+Stopping the gateway can take up to one Modbus request timeout (`timeout_ms`) per device, in
+parallel across devices, or one connect attempt; with host names, DNS resolution has no
+guaranteed upper bound.
 
 ## 14. Shutdown
 

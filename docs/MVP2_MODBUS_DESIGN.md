@@ -1,6 +1,6 @@
 # MVP 2 — Modbus TCP acquisition design
 
-Status: In progress — increments 2.2 (common ingress model, OPC UA bridge, runtime migration), 2.3 (multi-source YAML configuration), 2.4 (data decoder), 2.5 (Modbus TCP transport client) and 2.6 (Modbus TCP poller / acquisition source) implemented; multi-source runtime integration not started\
+Status: Implemented through increment 2.7 — common ingress model (2.2), multi-source YAML (2.3), data decoder (2.4), Modbus TCP client (2.5), polling source (2.6) and the multi-source runtime (2.7); a Modbus simulator for the Compose demo and release work remain\
 Tracking: [Issue #1](https://github.com/ernestoguevaraa/industrial-edge-gateway/issues/1)
 
 ## Motivation
@@ -42,18 +42,15 @@ decisions:
 - `OpcUaSource` (source ID `opcua-main`) wraps `Open62541Client`; `make_gateway_runtime()` builds it.
   The MVP 1 YAML, MQTT topics and payloads are unchanged.
 
-The runtime still owns exactly one source; the multi-source lifecycle is increment 4.
+Increment 2.7 extended the runtime to several sources (see "Multi-source runtime" below).
 
 ## Configuration (increment 2.3, implemented)
 
 The loader accepts OPC UA-only, Modbus-only and mixed deployments; the v0.1.0 YAML is unchanged
 and still valid. See `configs/gateway.mixed.example.yaml` (separate from the MVP 1 example).
 
-**Runtime status:** Modbus configuration is parsed and fully validated, but Modbus TCP
-acquisition is not implemented. `validate_for_mvp1()` and the `GatewayRuntime` constructor
-reject any configured Modbus device (and Modbus-only configurations), so the gateway exits with
-code 2 and `Modbus TCP acquisition is not implemented yet` instead of silently running only the
-OPC UA part.
+**Runtime status:** since increment 2.7 every configured source runs (OPC UA-only, Modbus-only
+and mixed). Until then the runtime rejected Modbus devices at startup.
 
 ### Sources
 
@@ -258,8 +255,8 @@ preserve exception codes ≥ 12 (they become `EMBBADEXC`), so those are `Protoco
 
 `ModbusTcpSource` (`gateway/include/ieg/modbus/modbus_tcp_source.hpp`, target
 `gateway_modbus_source`) implements `acquisition::IAcquisitionSource` for one device by combining
-an `IModbusClient` (by default `LibModbusClient`) with the decoder. It is not yet created by the
-runtime (increment 2.7), so the gateway still rejects Modbus configurations at startup.
+an `IModbusClient` (by default `LibModbusClient`) with the decoder. Since increment 2.7 the
+runtime creates one per configured device.
 
 ### Items, updates and diagnostics
 
@@ -340,6 +337,72 @@ callback (detected: it then only requests the stop). Latency:
   and timeout recovery, unavailable server, and measured stop latency.
 - The Modbus tests also pass under AddressSanitizer/UBSan and ThreadSanitizer.
 
+## Multi-source runtime (increment 2.7, implemented)
+
+`GatewayRuntime` owns a collection of `IAcquisitionSource`s that share one bounded queue, one
+consumer thread and one MQTT publisher. `make_gateway_runtime()` builds an `OpcUaSource` if
+`opcua` is configured and one `ModbusTcpSource` per `modbus.devices` entry; OPC UA-only,
+Modbus-only and mixed deployments with several Modbus devices are supported. The only remaining
+runtime restriction is MQTT QoS 1.
+
+### Item identity
+
+- Every point is keyed by `(source_id, item_id)`. Item IDs are unique per source only: the OPC UA
+  source keeps the MVP 1 IDs (configuration order of assets and nodes), each Modbus device numbers
+  its points `0..n-1` in configuration order and is asked for them with
+  `modbus_point_locator(point)` = `"<asset>/<tag>"`.
+- One immutable table holds every binding (asset, tag, unit, locator, protocol); a lookup hashes
+  the source ID and indexes the item, so concurrent callbacks need no lock and no mapping is
+  duplicated.
+- `TelemetryPoint::protocol` is `opcua` or `modbus_tcp`. Topics are `<prefix>/<asset levels>/<tag>`
+  for both, so OPC UA topics and payloads are exactly those of MVP 1; `(asset, tag)` is unique
+  across sources (configuration validation), so topics never collide.
+- An update from an unknown `source_id` is never published (`unknown_source`), nor one for an item
+  its source was not asked for (`unknown_item`). Statuses from unknown sources are ignored and
+  counted the same way.
+
+### Lifecycle
+
+- Construction requires exactly one source object per configured source ID (any order); missing,
+  unexpected, duplicate or null sources are rejected. Nothing connects before `start()`.
+- `start()`: monitor thread, publisher and consumer first, then the sources one after another.
+  If a source's `start()` throws, every source whose start was attempted is stopped (also the one
+  that threw), then the queue is closed and drained and the publisher stopped.
+- `stop()`: all started sources are stopped **concurrently** (one short-lived thread per source),
+  so shutdown waits for the slowest source rather than the sum; each source closes its client on
+  its own worker thread, never on the main thread. Then the queue is closed, the consumer drains
+  within `shutdown_drain_timeout_ms`, the publisher stops. Idempotent.
+
+### Concurrency
+
+Callbacks of different sources run concurrently. The data path uses the immutable table, atomic
+counters, a per-item lock for the last diagnostic text (written only by that item's source) and
+the queue's own short critical section. Status callbacks take the runtime state lock only to copy
+the state and detail strings; logging happens on the monitor thread.
+
+### Logs and diagnostics
+
+- `event=started sources=<n> mqtt_broker=... items=...`, then one
+  `event=source_started source_id=... protocol=... target=... items=...` per source.
+- `event=connection_state component=<protocol> source_id=<id> target=<endpoint|host:port>
+  state=... detail="..." transitions=n` per source (`component=opcua` / `component=mqtt` keep the
+  MVP 1 form, with `source_id` added for sources).
+- `event=no_value_updates source_id=... asset=... tag=... node_id|locator=... count=...
+  last_status=0x...|none diagnostic="..."` per item with Bad updates without value; OPC UA keeps
+  the key `node_id`. `item_diagnostics()` returns the same per `(source_id, locator)`, including
+  `protocol`, the raw native status (OPC UA StatusCode or Modbus exception code, never mixed: the
+  protocol tells them apart) and the symbolic diagnostic.
+- Modbus Bad updates carry no value and no source timestamp; they are counted, not published.
+
+### Tests
+
+- `multi_source_runtime_test.cpp`: exact source set, start order and per-source items, partial
+  start failure, equal item IDs across sources, unknown sources/items, Modbus-only, per-item
+  diagnostics, concurrent callbacks from three sources, shutdown order and concurrent stopping.
+- End-to-end (`gateway_end_to_end_test.cpp`): the gateway executable with the OPC UA simulator, an
+  in-process Modbus TCP server and Mosquitto — mixed (MVP 1 topics unchanged, Modbus payloads,
+  recovery after a Modbus outage in the same process) and Modbus-only.
+
 ## Modbus behavior
 
 - Prefer a maintained Modbus library (evaluate libmodbus before committing to a dependency). Keep the transport library private to the adapter target.
@@ -354,8 +417,8 @@ callback (detected: it then only requests the stop). Latency:
 1. Common ingress model and tests; adapt OPC UA without changing MQTT output. *(Done: increment 2.2.)*
 2. Backward-compatible YAML configuration; Modbus-only and mixed validation. *(Done: increment 2.3; the runtime still rejects Modbus devices.)*
 3. Modbus codec tests, then Modbus TCP polling/reconnection adapter. *(Codec: 2.4; transport client: 2.5; polling source: 2.6.)*
-4. Runtime multi-source lifecycle wiring and per-source diagnostics.
-5. Deterministic Modbus simulator, Compose demo, integration and E2E tests for mixed acquisition and recovery.
+4. Runtime multi-source lifecycle wiring and per-source diagnostics. *(Done: increment 2.7.)*
+5. Deterministic Modbus simulator, Compose demo, integration and E2E tests for mixed acquisition and recovery. *(Partly: integration and E2E tests with a deterministic in-process Modbus server done in 2.5–2.7; a Modbus simulator for the Compose demo is pending.)*
 6. README, runbook, architecture and changelog updates; CI and release verification.
 
 ## Release acceptance

@@ -133,7 +133,9 @@ GitHub Actions builds with GCC and Clang (Debug and Release, warnings as errors)
 
 Planned, not implemented in v0.1.0: Modbus TCP (MVP 2), SQLite store-and-forward (MVP 3),
 metrics and observability (MVP 4), ISA-95 asset modeling, TLS/mTLS and Sparkplug B. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#8-planned-evolution-not-implemented).
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#8-planned-evolution-not-implemented). Modbus TCP
+acquisition (mixed with OPC UA or alone) is implemented on the unreleased MVP 2 line; see
+[CHANGELOG.md](CHANGELOG.md) and [docs/MVP2_MODBUS_DESIGN.md](docs/MVP2_MODBUS_DESIGN.md).
 
 ## Engineering goals
 

@@ -39,6 +39,32 @@ config::GatewayConfig two_asset_config()
     return config;
 }
 
+config::ModbusDeviceConfig modbus_device()
+{
+    return config::ModbusDeviceConfig{
+        .source_id = "press-plc",
+        .host = "modbus-simulator",
+        .port = 502,
+        .unit_id = 1,
+        .poll_interval = std::chrono::milliseconds{1000},
+        .timeout = std::chrono::milliseconds{500},
+        .points = {config::ModbusPointConfig{.asset = "site01.line01.press02",
+                                             .tag = "pressure",
+                                             .unit = "bar",
+                                             .table = config::ModbusTable::HoldingRegisters,
+                                             .offset = 0,
+                                             .type = config::ModbusDataType::UInt16,
+                                             .word_order = std::nullopt,
+                                             .scale = 0.1}}};
+}
+
+// The OPC UA source ID as the std::string the item table is keyed by.
+const std::string& opc()
+{
+    static const std::string id{detail::kOpcUaSourceId};
+    return id;
+}
+
 constexpr domain::Timestamp kSourceTime{std::chrono::sys_days{std::chrono::year{2026} / 10 / 17}};
 constexpr domain::Timestamp kEdgeTime = kSourceTime + std::chrono::milliseconds{7};
 
@@ -51,16 +77,20 @@ TEST(ItemTable, AssignsIdsInConfigurationOrder)
     const std::vector<acquisition::Item> expected{{0, "ns=2;s=Line01.Press01.Pressure"},
                                                   {1, "ns=2;s=Line01.Press01.State"},
                                                   {2, "ns=2;s=Line01.Oven01.Temperature"}};
-    EXPECT_EQ(table.items(), expected);
+    ASSERT_EQ(table.sources().size(), 1U);
+    EXPECT_EQ(table.sources()[0].source_id, "opcua-main");
+    EXPECT_EQ(table.sources()[0].protocol, "opcua");
+    EXPECT_EQ(table.sources()[0].target, "opc.tcp://localhost:4840");
+    EXPECT_EQ(table.sources()[0].items, expected);
 
-    const auto* oven = table.find(2);
+    const auto* oven = table.find(opc(), 2);
     ASSERT_NE(oven, nullptr);
     EXPECT_EQ(oven->asset, "site01.line01.oven01");
     EXPECT_EQ(oven->tag, "temperature");
     EXPECT_EQ(oven->unit, "degC");
     EXPECT_EQ(oven->locator, "ns=2;s=Line01.Oven01.Temperature");
     EXPECT_EQ(oven->protocol, "opcua");
-    EXPECT_EQ(table.find(3), nullptr);
+    EXPECT_EQ(table.find(opc(), 3), nullptr);
 }
 
 TEST(ItemTable, RejectsConfigurationWithoutNodes)
@@ -68,6 +98,68 @@ TEST(ItemTable, RejectsConfigurationWithoutNodes)
     auto config = two_asset_config();
     config.assets.clear();
     EXPECT_THROW(ItemTable{config}, std::invalid_argument);
+}
+
+TEST(ItemTable, AddsOneSourcePerModbusDeviceAfterOpcUa)
+{
+    auto config = two_asset_config();
+    config.modbus.devices.push_back(modbus_device());
+    const ItemTable table{config};
+    ASSERT_EQ(table.sources().size(), 2U);
+    const auto& modbus = table.sources()[1];
+    EXPECT_EQ(modbus.source_id, "press-plc");
+    EXPECT_EQ(modbus.protocol, "modbus_tcp");
+    EXPECT_EQ(modbus.target, "modbus-simulator:502");
+    EXPECT_EQ(modbus.items,
+              (std::vector<acquisition::Item>{{0, "site01.line01.press02/pressure"}}));
+    EXPECT_EQ(table.size(), 4U);
+    EXPECT_EQ(table.source_index("press-plc"), std::optional<std::size_t>{1});
+}
+
+TEST(ItemTable, KeysItemsBySourceSoEqualItemIdsNeverCollide)
+{
+    auto config = two_asset_config();
+    config.modbus.devices.push_back(modbus_device());
+    const ItemTable table{config};
+    const auto* opcua = table.find(opc(), 0);
+    const auto* modbus = table.find("press-plc", 0);
+    ASSERT_NE(opcua, nullptr);
+    ASSERT_NE(modbus, nullptr);
+    EXPECT_NE(opcua, modbus);
+    EXPECT_EQ(opcua->tag, "pressure");
+    EXPECT_EQ(opcua->asset, "site01.line01.press01");
+    EXPECT_EQ(modbus->asset, "site01.line01.press02");
+    EXPECT_EQ(modbus->protocol, "modbus_tcp");
+    EXPECT_EQ(modbus->unit, "bar");
+    EXPECT_NE(table.index_of(*opcua), table.index_of(*modbus));
+}
+
+TEST(ItemTable, ReturnsNothingForUnknownSourcesOrItems)
+{
+    auto config = two_asset_config();
+    config.modbus.devices.push_back(modbus_device());
+    const ItemTable table{config};
+    EXPECT_EQ(table.find("unknown-plc", 0), nullptr);
+    EXPECT_EQ(table.find("press-plc", 1), nullptr);
+    EXPECT_EQ(table.source_index("unknown-plc"), std::nullopt);
+}
+
+TEST(ItemTable, SupportsModbusOnlyConfigurations)
+{
+    auto config = two_asset_config();
+    config.opcua.reset();
+    config.assets.clear();
+    config.modbus.devices.push_back(modbus_device());
+    auto second = modbus_device();
+    second.source_id = "oven-plc";
+    second.points[0].asset = "site01.line01.oven02";
+    config.modbus.devices.push_back(second);
+    const ItemTable table{config};
+    ASSERT_EQ(table.sources().size(), 2U);
+    EXPECT_EQ(table.sources()[0].source_id, "press-plc");
+    EXPECT_EQ(table.sources()[1].source_id, "oven-plc");
+    EXPECT_EQ(table.find(opc(), 0), nullptr);
+    EXPECT_EQ(table.find("oven-plc", 0)->asset, "site01.line01.oven02");
 }
 
 // ---- make_point ----------------------------------------------------------------------------
@@ -82,7 +174,7 @@ TEST(MakePoint, MapsValueMetadataAndTimestamps)
                                      .source_timestamp = kSourceTime,
                                      .native_status = 0,
                                      .diagnostic = {}};
-    const auto point = make_point(*table.find(0), change, kEdgeTime);
+    const auto point = make_point(*table.find(opc(), 0), change, kEdgeTime);
     const std::optional<domain::TelemetryPoint> expected{
         domain::TelemetryPoint{.asset = "site01.line01.press01",
                                .tag = "pressure",
@@ -106,7 +198,7 @@ TEST(MakePoint, KeepsUncertainAndBadQualityVisible)
                                          .source_timestamp = kSourceTime,
                                          .native_status = 0x808C0000U,
                                          .diagnostic = {}};
-        const auto point = make_point(*table.find(2), change, kEdgeTime);
+        const auto point = make_point(*table.find(opc(), 2), change, kEdgeTime);
         EXPECT_TRUE(point.has_value() && point->quality == quality);
     }
 }
@@ -121,7 +213,7 @@ TEST(MakePoint, AbsentSourceTimestampStaysAbsent)
                                      .source_timestamp = std::nullopt,
                                      .native_status = 0,
                                      .diagnostic = {}};
-    const auto point = make_point(*table.find(1), change, kEdgeTime);
+    const auto point = make_point(*table.find(opc(), 1), change, kEdgeTime);
     EXPECT_TRUE(point.has_value() && !point->source_timestamp.has_value() &&
                 point->edge_timestamp == kEdgeTime);
 }
@@ -136,7 +228,7 @@ TEST(MakePoint, NoValueNeverBecomesATelemetryPoint)
                                      .source_timestamp = std::nullopt,
                                      .native_status = 0x80340000U,
                                      .diagnostic = {}};
-    EXPECT_FALSE(make_point(*table.find(0), change, kEdgeTime).has_value());
+    EXPECT_FALSE(make_point(*table.find(opc(), 0), change, kEdgeTime).has_value());
 }
 
 TEST(ReceiptTime, IsCurrentSystemTime)
@@ -148,41 +240,22 @@ TEST(ReceiptTime, IsCurrentSystemTime)
     EXPECT_LE(receipt, std::chrono::time_point_cast<std::chrono::nanoseconds>(after));
 }
 
-config::ModbusDeviceConfig modbus_device()
-{
-    return config::ModbusDeviceConfig{
-        .source_id = "press-plc",
-        .host = "modbus-simulator",
-        .port = 502,
-        .unit_id = 1,
-        .poll_interval = std::chrono::milliseconds{1000},
-        .timeout = std::chrono::milliseconds{500},
-        .points = {config::ModbusPointConfig{.asset = "site01.line01.press02",
-                                             .tag = "pressure",
-                                             .unit = "bar",
-                                             .table = config::ModbusTable::HoldingRegisters,
-                                             .offset = 0,
-                                             .type = config::ModbusDataType::UInt16,
-                                             .word_order = std::nullopt,
-                                             .scale = 0.1}}};
-}
-
 // ---- Startup validation -------------------------------------------------------------------
 
-TEST(ValidateForMvp1, AcceptsQos1)
+TEST(ValidateRuntimeConfig, AcceptsQos1)
 {
     auto config = two_asset_config();
     config.mqtt.qos = config::MqttQos::AtLeastOnce;
-    EXPECT_NO_THROW(validate_for_mvp1(config));
+    EXPECT_NO_THROW(validate_runtime_config(config));
 }
 
-TEST(ValidateForMvp1, RejectsQos0And2Clearly)
+TEST(ValidateRuntimeConfig, RejectsQos0And2Clearly)
 {
     for (const auto qos : {config::MqttQos::AtMostOnce, config::MqttQos::ExactlyOnce}) {
         auto config = two_asset_config();
         config.mqtt.qos = qos;
         try {
-            validate_for_mvp1(config);
+            validate_runtime_config(config);
             ADD_FAILURE() << "expected StartupError";
         } catch (const StartupError& error) {
             EXPECT_THAT(error.what(), HasSubstr("mqtt.qos must be 1"));
@@ -191,39 +264,38 @@ TEST(ValidateForMvp1, RejectsQos0And2Clearly)
     }
 }
 
-TEST(ValidateForMvp1, RejectsMixedConfigurationBecauseModbusIsNotImplemented)
+TEST(ValidateRuntimeConfig, AcceptsMixedAndModbusOnlyConfigurations)
 {
-    auto config = two_asset_config();
-    config.modbus.devices.push_back(modbus_device());
-    try {
-        validate_for_mvp1(config);
-        ADD_FAILURE() << "expected StartupError";
-    } catch (const StartupError& error) {
-        EXPECT_THAT(error.what(), HasSubstr("Modbus TCP acquisition is not implemented yet"));
-    }
+    auto mixed = two_asset_config();
+    mixed.modbus.devices.push_back(modbus_device());
+    EXPECT_NO_THROW(validate_runtime_config(mixed));
+    auto modbus_only = mixed;
+    modbus_only.opcua.reset();
+    modbus_only.assets.clear();
+    EXPECT_NO_THROW(validate_runtime_config(modbus_only));
 }
 
-TEST(ValidateForMvp1, RejectsModbusOnlyConfiguration)
+TEST(MakeGatewayRuntime, BuildsTheMixedExampleWithoutNetworkActivity)
+{
+    const auto config = config::load_config_file(IEG_MIXED_EXAMPLE_CONFIG_PATH);
+    ASSERT_FALSE(config.modbus.devices.empty());
+    const auto runtime = make_gateway_runtime(config);
+    ASSERT_NE(runtime, nullptr);
+    const auto items = runtime->item_diagnostics();
+    EXPECT_EQ(items.size(), 2U + config.modbus.devices[0].points.size());
+    EXPECT_EQ(items.back().protocol, "modbus_tcp");
+}
+
+TEST(MakeGatewayRuntime, BuildsAModbusOnlyRuntime)
 {
     auto config = two_asset_config();
     config.opcua.reset();
     config.assets.clear();
+    config.mqtt.client_id = "ieg-unit-test";
     config.modbus.devices.push_back(modbus_device());
-    try {
-        validate_for_mvp1(config);
-        ADD_FAILURE() << "expected StartupError";
-    } catch (const StartupError& error) {
-        EXPECT_THAT(error.what(), HasSubstr("Modbus TCP acquisition is not implemented yet"));
-        EXPECT_THAT(error.what(), HasSubstr("an OPC UA source (opcua and assets) is required"));
-    }
-}
-
-TEST(MakeGatewayRuntime, RejectsTheMixedExampleFileAtStartup)
-{
-    // The mixed example parses and validates, but must not start as if Modbus worked.
-    const auto config = config::load_config_file(IEG_MIXED_EXAMPLE_CONFIG_PATH);
-    ASSERT_FALSE(config.modbus.devices.empty());
-    EXPECT_THROW(static_cast<void>(make_gateway_runtime(config)), StartupError);
+    const auto runtime = make_gateway_runtime(config);
+    ASSERT_NE(runtime, nullptr);
+    EXPECT_EQ(runtime->item_diagnostics().at(0).source_id, "press-plc");
 }
 
 TEST(RuntimeOptionsFrom, UsesConfiguredQueueCapacityAndDrainTimeout)

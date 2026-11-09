@@ -1,10 +1,11 @@
-# Mixed OPC UA + Modbus TCP configuration (MVP 2 schema preview).
+# Mixed OPC UA + Modbus TCP configuration (MVP 2).
 #
-# STATUS: this file is parsed and validated by the configuration loader, but Modbus TCP
-# acquisition is NOT implemented yet: the gateway rejects it at startup (exit code 2) with
-# "Modbus TCP acquisition is not implemented yet". Use configs/gateway.example.yaml for the
-# working OPC UA -> MQTT demo. Modbus TCP is plaintext and unauthenticated; use it only on
-# isolated networks.
+# The gateway runs one OPC UA source and one Modbus TCP source per device, all publishing
+# through the same MQTT pipeline (Modbus points with "protocol": "modbus_tcp"). This file expects
+# an OPC UA server at plant-simulator:4840 and a Modbus TCP server at modbus-simulator:502; the
+# Compose demo provides only the OPC UA simulator, so adapt the Modbus host for your environment.
+# configs/gateway.example.yaml remains the OPC UA-only demo configuration.
+# Modbus TCP is plaintext and unauthenticated; use it only on isolated networks.
 #
 # Modbus conventions (docs/MVP2_MODBUS_DESIGN.md):
 #  - offset is the ZERO-BASED PDU address in its table: holding register "40001" is

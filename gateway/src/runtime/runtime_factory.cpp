@@ -1,4 +1,5 @@
 #include "ieg/acquisition/opcua_source.hpp"
+#include "ieg/modbus/modbus_tcp_source.hpp"
 #include "ieg/mqtt/mqtt_publisher.hpp"
 #include "ieg/opcua/open62541_client.hpp"
 #include "ieg/runtime/gateway_runtime.hpp"
@@ -10,22 +11,41 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace ieg::runtime {
+namespace {
 
-void validate_for_mvp1(const config::GatewayConfig& config)
+using SourceList = std::vector<std::unique_ptr<acquisition::IAcquisitionSource>>;
+
+// One source per configured source; constructing them performs no network activity (clients
+// connect on their own worker threads after start()).
+SourceList make_sources(const config::GatewayConfig& config)
+{
+    SourceList sources;
+    if (config.opcua) {
+        // The OPC UA client is owned by its acquisition source; the runtime only sees the
+        // SDK-neutral IAcquisitionSource.
+        sources.push_back(std::make_unique<acquisition::OpcUaSource>(
+            std::string{detail::kOpcUaSourceId},
+            std::make_unique<opcua::Open62541Client>(opcua::Open62541ClientOptions{
+                .endpoint = config.opcua->endpoint,
+                .publishing_interval = config.opcua->subscription_interval})));
+    }
+    for (const auto& device : config.modbus.devices) {
+        // LibModbusClient is created, used and destroyed on the source's own worker thread.
+        sources.push_back(std::make_unique<modbus::ModbusTcpSource>(device));
+    }
+    return sources;
+}
+
+} // namespace
+
+void validate_runtime_config(const config::GatewayConfig& config)
 {
     std::string errors;
-    if (!config.modbus.devices.empty()) {
-        errors += "\n - modbus: " + std::to_string(config.modbus.devices.size()) +
-                  " Modbus TCP device(s) configured, but Modbus TCP acquisition is not "
-                  "implemented yet; remove the modbus section";
-    }
-    if (!config.opcua) {
-        errors += "\n - opcua: an OPC UA source (opcua and assets) is required by this runtime";
-    }
     if (config.mqtt.qos != config::MqttQos::AtLeastOnce) {
-        errors += "\n - mqtt.qos must be 1 (at least once) for MVP 1; got " +
+        errors += "\n - mqtt.qos must be 1 (at least once); got " +
                   std::to_string(static_cast<int>(config.mqtt.qos));
     }
     if (!errors.empty()) {
@@ -42,30 +62,19 @@ RuntimeOptions runtime_options_from(const config::GatewayConfig& config)
 
 std::unique_ptr<GatewayRuntime> make_gateway_runtime(const config::GatewayConfig& config)
 {
-    validate_for_mvp1(config);
-    if (!config.opcua) {
-        throw StartupError("configuration has no OPC UA source"); // validate_for_mvp1() rejects it
-    }
-    const config::OpcUaConfig& opcua_config = *config.opcua;
+    validate_runtime_config(config);
     if (config.mqtt.client_id.empty()) {
         spdlog::warn("event=mqtt_client_id_fallback message=\"mqtt.client_id is not configured; "
                      "using the development fallback ieg-gateway-<hostname>, which is not stable "
                      "across container recreation\"");
     }
     try {
-        // The OPC UA client is owned by its acquisition source; the runtime only sees the
-        // SDK-neutral IAcquisitionSource.
-        auto source = std::make_unique<acquisition::OpcUaSource>(
-            std::string{detail::kOpcUaSourceId},
-            std::make_unique<opcua::Open62541Client>(opcua::Open62541ClientOptions{
-                .endpoint = opcua_config.endpoint,
-                .publishing_interval = opcua_config.subscription_interval}));
         auto publisher = std::make_unique<mqtt::MqttPublisher>(
             mqtt::MqttPublisherOptions{.host = config.mqtt.host,
                                        .port = config.mqtt.port,
                                        .topic_prefix = config.mqtt.topic_prefix,
                                        .client_id = config.mqtt.client_id});
-        return std::make_unique<GatewayRuntime>(config, std::move(source), std::move(publisher),
+        return std::make_unique<GatewayRuntime>(config, make_sources(config), std::move(publisher),
                                                 runtime_options_from(config));
     } catch (const std::invalid_argument& error) {
         throw StartupError(std::string{"invalid gateway configuration: "} + error.what());

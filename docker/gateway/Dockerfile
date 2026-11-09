@@ -6,8 +6,7 @@
 
 FROM ubuntu:24.04 AS build
 ARG DEBIAN_FRONTEND=noninteractive
-# libmodbus-dev: required by the CMake configuration (Modbus TCP client library). The gateway
-# executable does not link libmodbus yet, so the runtime stage does not need libmodbus5.
+# libmodbus-dev: libmodbus 3.1.10 for the Modbus TCP sources (exact version checked by CMake).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ libmbedtls-dev libmodbus-dev ninja-build \
@@ -24,10 +23,11 @@ RUN --mount=type=cache,target=/build \
 
 FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
-# Runtime libraries of the official open62541 amalgamation's mbedTLS dependency.
+# Runtime libraries of the official open62541 amalgamation's mbedTLS dependency and of libmodbus
+# (dynamically linked, LGPL-2.1-or-later).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libmbedcrypto7t64 libmbedtls14t64 libmbedx509-1t64 \
+        libmbedcrypto7t64 libmbedtls14t64 libmbedx509-1t64 libmodbus5 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10002 --no-create-home --shell /usr/sbin/nologin gateway
 COPY --from=build /out/ieg-gateway /usr/local/bin/ieg-gateway

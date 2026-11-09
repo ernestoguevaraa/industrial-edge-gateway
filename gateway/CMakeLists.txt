@@ -44,14 +44,13 @@ gateway_set_warnings(gateway_modbus_api)
 
 # libmodbus-backed Modbus TCP client. libmodbus is linked PRIVATE so it cannot leak into
 # dependants; the private headers under src/ are only reachable by this target and its tests.
-# Not linked into the gateway executable yet (no polling/runtime integration).
 add_library(gateway_modbus_tcp STATIC src/modbus/libmodbus_client.cpp src/modbus/libmodbus_errors.cpp)
 target_include_directories(gateway_modbus_tcp PRIVATE src)
 target_link_libraries(gateway_modbus_tcp PUBLIC gateway_modbus_api PRIVATE libmodbus::libmodbus)
 gateway_set_warnings(gateway_modbus_tcp)
 
 # Modbus TCP acquisition source: polls one device with an IModbusClient (LibModbusClient by
-# default) on its own worker thread. Not wired into the runtime yet.
+# default) on its own worker thread. One instance per configured device in the runtime.
 add_library(gateway_modbus_source STATIC src/modbus/modbus_tcp_source.cpp src/modbus/poll_plan.cpp)
 target_include_directories(gateway_modbus_source PRIVATE src)
 target_link_libraries(gateway_modbus_source PUBLIC gateway_acquisition_api gateway_modbus_api PRIVATE gateway_modbus_tcp
@@ -77,8 +76,8 @@ add_library(gateway_core INTERFACE)
 target_include_directories(gateway_core INTERFACE include)
 target_link_libraries(gateway_core INTERFACE gateway_domain)
 
-# Gateway runtime: wires configuration, the acquisition source, the queue and the MQTT publisher.
-# Its public interface is SDK- and protocol-neutral; the OPC UA source and client are private
+# Gateway runtime: wires configuration, the acquisition sources, the queue and the MQTT publisher.
+# Its public interface is SDK- and protocol-neutral; the OPC UA and Modbus TCP sources are private
 # wiring of make_gateway_runtime().
 add_library(gateway_runtime STATIC src/runtime/gateway_runtime.cpp src/runtime/runtime_factory.cpp
                                    src/runtime/telemetry_mapping.cpp)
@@ -86,7 +85,7 @@ target_include_directories(gateway_runtime PRIVATE src)
 target_link_libraries(
   gateway_runtime
   PUBLIC gateway_config gateway_core gateway_acquisition_api gateway_output_api
-  PRIVATE gateway_acquisition_opcua gateway_mqtt gateway_opcua_open62541 spdlog::spdlog)
+  PRIVATE gateway_acquisition_opcua gateway_modbus_source gateway_mqtt gateway_opcua_open62541 spdlog::spdlog)
 gateway_set_warnings(gateway_runtime)
 
 add_executable(gateway src/main.cpp)

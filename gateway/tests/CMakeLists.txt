@@ -29,6 +29,7 @@ add_executable(
   output/publish_result_test.cpp
   output/telemetry_publisher_mock_test.cpp
   runtime/gateway_runtime_test.cpp
+  runtime/multi_source_runtime_test.cpp
   runtime/opcua_source_runtime_test.cpp
   runtime/telemetry_mapping_test.cpp)
 # The adapter's private headers (gateway/src) are visible to its unit tests only.
@@ -70,10 +71,8 @@ target_include_directories(gateway_integration_tests PRIVATE ${CMAKE_CURRENT_SOU
 target_link_libraries(
   gateway_integration_tests PRIVATE gateway_acquisition_opcua gateway_domain gateway_mqtt gateway_opcua_open62541
                                     eclipse-paho-mqtt-c::paho-mqtt3a-static GTest::gtest_main)
-target_compile_definitions(
-  gateway_integration_tests
-  PRIVATE IEG_SIMULATOR_DIR="${PROJECT_SOURCE_DIR}/simulator" IEG_GATEWAY_BINARY="$<TARGET_FILE:gateway>"
-          IEG_MIXED_EXAMPLE_CONFIG_PATH="${PROJECT_SOURCE_DIR}/configs/gateway.mixed.example.yaml")
+target_compile_definitions(gateway_integration_tests PRIVATE IEG_SIMULATOR_DIR="${PROJECT_SOURCE_DIR}/simulator"
+                                                             IEG_GATEWAY_BINARY="$<TARGET_FILE:gateway>")
 # The end-to-end test runs the real gateway executable.
 add_dependencies(gateway_integration_tests gateway)
 gateway_set_warnings(gateway_integration_tests)
