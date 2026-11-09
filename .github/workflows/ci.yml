@@ -122,6 +122,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Test smoke-test helpers
+        run: scripts/tests/output-contains-test.sh
+
       - name: Run MVP 2 Compose smoke test
         # OPC UA simulator + Modbus TCP simulator + gateway (configs/gateway.mixed.example.yaml)
         # + Mosquitto (compose.mvp2.yaml): checks the 7 OPC UA and 11 Modbus topics, protocols,

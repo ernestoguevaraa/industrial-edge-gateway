@@ -19,6 +19,8 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source=scripts/lib/output-contains.sh
+source scripts/lib/output-contains.sh
 
 readonly PROJECT="${IEG_SMOKE_PROJECT:-ieg-smoke-mvp2}"
 readonly TOPIC_TIMEOUT_S=90 # safety bound for the subscriber; it is stopped explicitly
@@ -336,7 +338,8 @@ require_log "$logs" \
     'component=modbus_tcp source_id=compressor-plc .*state=Connected'
 ! grep -Eq 'component=opcua .*state=Disconnected' <<<"$logs" ||
     fail "the OPC UA source disconnected during the Modbus restart"
-compose logs --no-color modbus-simulator | grep -q '"event": "stopped"' ||
+# Not `compose logs | grep -q`: under pipefail, grep's early exit makes compose fail with SIGPIPE.
+output_contains '"event": "stopped"' compose logs --no-color modbus-simulator ||
     fail "modbus-simulator did not log a clean stop on SIGTERM"
 
 echo "==> restarting mosquitto: OPC UA and Modbus telemetry must flow again"
