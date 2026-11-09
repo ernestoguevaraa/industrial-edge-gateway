@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -468,6 +469,27 @@ TEST(ModbusTcpSource, SplitsABlockThatAnswersWithAnExceptionAndKeepsTheNeighbour
     EXPECT_EQ(harness.device().connects(), 1); // exceptions keep the connection
 }
 
+TEST(ModbusTcpSource, KeepsTheBlockForTransientExceptionsSuchAsGatewayFailures)
+{
+    // 0x0B (gateway target failed) describes the device's state, not the request: the block is
+    // reported Bad and read as one request again in the next cycle, never split.
+    SourceHarness harness;
+    harness.start();
+    harness.wait_for_cycle_waits(1);
+    harness.device().fail_next_read(error_of(ModbusErrorKind::ModbusException, 0x0B)); // coils
+    harness.device().fail_next_read(error_of(ModbusErrorKind::ModbusException, 0x0B)); // block
+    harness.clock().advance_to_deadline();
+    harness.wait_for_cycle_waits(2);
+    EXPECT_EQ(last_for(harness.recorder().updates(), 101), bad(101, "modbus_exception", 0x0B));
+    harness.clock().advance_to_deadline();
+    harness.wait_for_cycle_waits(3);
+    const auto requests = harness.device().requests();
+    ASSERT_EQ(requests.size(), 9U); // three cycles of the same three requests
+    EXPECT_EQ(requests[7], (Request{ModbusTable::HoldingRegisters, 0, 4}));
+    EXPECT_EQ(last_for(harness.recorder().updates(), 101), good(101, std::int64_t{-100}));
+    EXPECT_EQ(harness.device().connects(), 1);
+}
+
 TEST(ModbusTcpSource, ReportsAnExceptionOfASinglePointReadWithItsCode)
 {
     SourceHarness harness;
@@ -545,6 +567,23 @@ TEST(ModbusTcpSource, BacksOffExponentiallyAndResetsAfterAConnection)
     EXPECT_EQ(last_for(harness.recorder().updates(), 100), bad(100, "connection_lost"));
 }
 
+TEST(ModbusTcpSource, BackoffKeepsGrowingWhenConnectsSucceedButReadsNeverDo)
+{
+    // A device that accepts TCP but never answers must not be reconnected at a fixed rate.
+    SourceHarness harness;
+    for (int i = 0; i < 4; ++i) {
+        harness.device().fail_next_read(error_of(ModbusErrorKind::Timeout));
+    }
+    harness.start();
+    release_waits(harness.clock(), 4);
+    const auto deadlines = harness.clock().deadlines();
+    const auto t0 = ManualClock::start();
+    // Each connect + timed-out read happens at the previous deadline; delays 100, 200, 400, 400.
+    EXPECT_EQ(deadlines, (std::vector<ManualClock::time_point>{t0 + 100ms, t0 + 300ms, t0 + 700ms,
+                                                               t0 + 1100ms}));
+    EXPECT_EQ(harness.device().connects(), 4);
+}
+
 TEST(ModbusTcpSource, JitterIsBoundedAndDeterministicForAFixedSeed)
 {
     const auto first = reconnect_delays(7, 0.5, 5);
@@ -563,6 +602,30 @@ TEST(ModbusTcpSource, RetriesWhenTheClientFactoryFails)
     harness.wait_for_cycle_waits(1);
     harness.clock().advance_to_deadline();
     EXPECT_TRUE(harness.recorder().wait_for_updates(5));
+}
+
+TEST(ModbusTcpSource, ReportsANonStandardFactoryExceptionInsteadOfTerminating)
+{
+    auto clock = std::make_shared<ManualClock>();
+    FakeModbusDevice device;
+    int calls = 0;
+    ModbusTcpSource source{
+        device_config(),
+        [&]() -> std::unique_ptr<IModbusClient> {
+            if (calls++ == 0) {
+                throw 42; // NOLINT(hicpp-exception-baseclass): the case under test
+            }
+            return device.make_client();
+        },
+        deterministic_options(), clock};
+    SourceRecorder recorder;
+    source.start(all_items(), recorder.callbacks());
+    ASSERT_TRUE(recorder.wait_for_state(ConnectionState::Disconnected));
+    EXPECT_EQ(recorder.statuses().front().detail, "client_error: unknown exception");
+    ASSERT_TRUE(clock->wait_for_waits(1));
+    clock->advance_to_deadline();
+    EXPECT_TRUE(recorder.wait_for_updates(5));
+    source.stop();
 }
 
 // ---- Threading and shutdown --------------------------------------------------------------------
@@ -604,6 +667,28 @@ TEST(ModbusTcpSource, StopDuringBackoffReturnsPromptly)
     const auto before = std::chrono::steady_clock::now();
     harness.source().stop();
     EXPECT_LT(std::chrono::steady_clock::now() - before, 500ms);
+}
+
+TEST(ModbusTcpSource, StopFromACallbackDoesNotDeadlockAndEndsTheWorker)
+{
+    // A contract violation, but it must neither self-join nor race with the owner's stop().
+    auto clock = std::make_shared<ManualClock>();
+    FakeModbusDevice device;
+    ModbusTcpSource source{device_config(), [&] { return device.make_client(); },
+                           deterministic_options(), clock};
+    std::atomic<int> updates{0};
+    source.start(all_items(),
+                 acquisition::Callbacks{.on_update =
+                                            [&](const Update&) {
+                                                if (updates++ == 0) {
+                                                    source.stop(); // from the worker thread
+                                                }
+                                            },
+                                        .on_status = [](const acquisition::Status&) {}});
+    const auto before = std::chrono::steady_clock::now();
+    source.stop(); // the owner's stop() joins the (already stopping) worker
+    EXPECT_LT(std::chrono::steady_clock::now() - before, 2s);
+    EXPECT_EQ(device.clients_alive(), 0);
 }
 
 TEST(ModbusTcpSource, DestructionStopsTheWorker)

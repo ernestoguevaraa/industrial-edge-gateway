@@ -173,7 +173,6 @@ public:
         try {
             monitor_ = std::thread([this] { monitor(); });
             publisher_->start([this](const output::PublisherStatus& s) { on_publisher_status(s); });
-            publisher_started_ = true;
             consumer_ = std::thread([this] { consume(); });
             for (std::size_t i = 0; i < sources_.size(); ++i) {
                 // Counted before start(): a source whose start() throws is stopped as well.
@@ -614,10 +613,10 @@ private:
                           options_.drain_timeout.count(), queue_.stats().size);
             publisher_->stop();
         }
-        // 4. Stop the publisher (idempotent).
-        if (publisher_started_) {
-            publisher_->stop();
-        }
+        // 4. Stop the publisher. Always (once a start was attempted): stop() is idempotent and
+        //    safe without a successful start(), and it guarantees no status callback runs
+        //    afterwards, even if start() threw after starting the publisher's own threads.
+        publisher_->stop();
         // 5. Join the consumer; it returns promptly once the publisher is stopped.
         if (consumer_.joinable()) {
             consumer_.join();
@@ -711,7 +710,6 @@ private:
     std::mutex lifecycle_mutex_;
     bool start_attempted_{false};
     bool stopped_{false};
-    bool publisher_started_{false};
     std::size_t sources_attempted_{0};
     std::promise<void> consumer_done_;
     std::future<void> consumer_done_future_{consumer_done_.get_future()};

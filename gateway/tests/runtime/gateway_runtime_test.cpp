@@ -308,6 +308,8 @@ TEST(GatewayRuntime, PublisherStartFailureNeverStartsOrStopsTheSource)
         }));
     EXPECT_CALL(harness.source(), start(_, _)).Times(0);
     EXPECT_CALL(harness.source(), stop()).Times(0);
+    // The publisher may have started threads before throwing: it is stopped anyway.
+    EXPECT_CALL(harness.publisher(), stop()).Times(::testing::AtLeast(1));
     EXPECT_THROW(harness.runtime().start(), std::runtime_error);
 }
 

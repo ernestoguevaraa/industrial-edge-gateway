@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased — MVP 2 (in progress)
+## v0.2.0 — MVP 2: Modbus TCP acquisition (release candidate, not yet tagged)
+
+Release notes and upgrade guide: [RELEASE_NOTES_v0.2.0.md](RELEASE_NOTES_v0.2.0.md).
 
 ### Added
 
@@ -58,13 +60,39 @@
   Build prerequisite: `libmodbus-dev`.
 - Modbus TCP acquisition source `ModbusTcpSource` (`IAcquisitionSource` for one device): one
   owner thread per device, sequential requests, read grouping of contiguous points without gaps
-  (split into single-point reads after a Modbus exception), fixed-rate polling that skips missed
+  (split into single-point reads after an exception about the request: 0x01, 0x02 or 0x03;
+  transient exceptions keep the plan), fixed-rate polling that skips missed
   slots on overrun, bounded exponential reconnect backoff with seedable jitter, interruptible
   waits and a joined, idempotent `stop()`.
 - `acquisition::Update::diagnostic`: a stable symbolic reason for Bad updates without a native
   status (e.g. `timeout`, `decode_non_finite_value`); empty for OPC UA.
 - `configs/gateway.mixed.example.yaml` is the MVP 2 demo configuration: the seven MVP 1 OPC UA
   nodes plus the Modbus simulator's eleven points (host `modbus-simulator`, port 5020, unit 1).
+
+### Fixed (release audit)
+
+- A transient Modbus exception (e.g. 0x06 busy, 0x0B gateway target failed) on a multi-point
+  block no longer splits the read plan permanently; only exceptions about the request (0x01,
+  0x02, 0x03) split a block. Before, a short outage of a device behind a Modbus gateway could
+  multiply the number of requests per cycle until restart.
+- The Modbus reconnect backoff now keeps growing when connections succeed but no read does (a
+  device that accepts TCP but never answers); before, it reconnected at the initial delay.
+- The runtime stops the publisher even if its `start()` threw after starting threads.
+- `ModbusTcpSource::stop()` from a callback (a contract violation) no longer races with the
+  thread assignment in `start()`; a non-standard exception from the client factory is reported
+  as `client_error` instead of terminating the process.
+
+### Security
+
+- Demo configurations are not production security configurations: anonymous MQTT without TLS,
+  OPC UA security mode None, plaintext and unauthenticated Modbus TCP. Host ports bind to
+  127.0.0.1; all containers run as non-root users.
+- libmodbus 3.1.10 (Ubuntu 24.04) has open CVEs (no fixed release is known for CVE-2023-26793;
+  CVE-2024-10918 is fixed upstream in 3.1.11). The gateway
+  uses only client read functions: CVE-2024-10918 (`modbus_reply`) and CVE-2024-34244
+  (`modbus_write_bits`) are not reachable; CVE-2023-26793 (`read_io_status`) is on the read path
+  of coils and discrete inputs and could be triggered by a malicious or compromised Modbus
+  device. Only connect to trusted devices on isolated networks (details in the release notes).
 
 ## v0.1.0 — MVP 1: OPC UA → MQTT vertical slice
 

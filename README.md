@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/ernestoguevaraa/industrial-edge-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ernestoguevaraa/industrial-edge-gateway/actions/workflows/ci.yml)
 
-A **C++20 Industrial IoT edge gateway** that connects OPC UA servers to MQTT 5 using a normalized telemetry model.
+A **C++20 Industrial IoT edge gateway** that connects OPC UA servers and Modbus TCP devices to MQTT 5 using a normalized telemetry model.
 
-**Status: v0.1.0 (MVP 1).** A complete OPC UA → MQTT vertical slice and a reference
-implementation, not a production-ready product: no authentication or TLS, no persistence.
+**Status: v0.2.0 release candidate (MVP 2)** on top of v0.1.0 (MVP 1): OPC UA and Modbus TCP
+acquisition into one MQTT pipeline. A reference implementation, not a production-ready product:
+no authentication or TLS, no persistence. See [RELEASE_NOTES_v0.2.0.md](RELEASE_NOTES_v0.2.0.md).
 
 MVP 1 demonstrates a realistic OT-to-IT data path:
 
@@ -62,6 +63,20 @@ Not included in MVP 1:
 - Grafana / InfluxDB / Prometheus
 
 See [Roadmap](#roadmap).
+
+## MVP 2
+
+MVP 2 adds Modbus TCP as a second acquisition protocol without changing the MQTT output:
+
+- Common, protocol-neutral acquisition API (`IAcquisitionSource`); OPC UA and each Modbus TCP
+  device are sources of the same runtime, keyed by `(source_id, item_id)`
+- Modbus TCP polling on libmodbus 3.1.10: coils, discrete inputs, holding and input registers;
+  `bool`, `uint16`, `int16`, `uint32`, `int32`, `float32` with explicit word order and scaling
+- OPC UA-only, Modbus-only and mixed configurations (backward compatible with the v0.1.0 YAML)
+- Reconnection with bounded exponential backoff, per-source logs and diagnostics
+- Deterministic Modbus TCP simulator and a mixed Docker Compose demo (`compose.mvp2.yaml`)
+
+Still not included: Modbus RTU and writes, store-and-forward, TLS/mTLS, Sparkplug B, metrics.
 
 ## Example telemetry
 
@@ -168,11 +183,11 @@ GitHub Actions builds with GCC and Clang (Debug and Release, warnings as errors)
 
 ## Roadmap
 
-Planned, not implemented in v0.1.0: Modbus TCP (MVP 2), SQLite store-and-forward (MVP 3),
-metrics and observability (MVP 4), ISA-95 asset modeling, TLS/mTLS and Sparkplug B. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#8-planned-evolution-not-implemented). Modbus TCP
-acquisition (mixed with OPC UA or alone) is implemented on the unreleased MVP 2 line; see
-[CHANGELOG.md](CHANGELOG.md) and [docs/MVP2_MODBUS_DESIGN.md](docs/MVP2_MODBUS_DESIGN.md).
+Implemented: OPC UA → MQTT (v0.1.0, MVP 1) and Modbus TCP acquisition (v0.2.0, MVP 2; see
+[CHANGELOG.md](CHANGELOG.md) and [docs/MVP2_MODBUS_DESIGN.md](docs/MVP2_MODBUS_DESIGN.md)).
+Planned, not implemented: SQLite store-and-forward (MVP 3), metrics and observability (MVP 4),
+ISA-95 asset modeling, TLS/mTLS and Sparkplug B. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#8-planned-evolution-not-implemented).
 
 ## Engineering goals
 

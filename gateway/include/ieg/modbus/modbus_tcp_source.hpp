@@ -4,6 +4,7 @@
 #include "ieg/config/gateway_config.hpp"
 #include "ieg/modbus/modbus_client.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -90,10 +91,13 @@ using ModbusClientFactory = std::function<std::unique_ptr<IModbusClient>()>;
 // next deadline is the first future slot on the original grid.
 //
 // Failures: a Modbus exception marks the items of that block Bad (with the exception code) and
-// keeps the connection; a multi-point block that answers with an exception is split into
-// single-point reads (immediately and for later cycles), so one bad address does not hide its
-// neighbours. A timeout, connection loss or protocol error marks the remaining items of the
-// cycle Bad, reports Disconnected and reconnects after a bounded exponential backoff.
+// keeps the connection. A multi-point block that answers with an exception about the request
+// itself (0x01 illegal function, 0x02 illegal data address, 0x03 illegal data value) is split
+// into single-point reads (immediately and for later cycles), so one bad address does not hide
+// its neighbours; other exception codes (e.g. 0x06 busy, 0x0B gateway target failed) describe a
+// transient device state and leave the plan unchanged. A timeout, connection loss or protocol error
+// marks the remaining items of the cycle Bad, reports Disconnected and reconnects after a bounded
+// exponential backoff.
 //
 // Shutdown: stop() requests the stop and joins the worker. Waits (polling interval, backoff) end
 // immediately; a request in progress cannot be interrupted, so stop() can take up to one
@@ -139,8 +143,11 @@ private:
 
     std::mutex lifecycle_mutex_;
     Phase phase_{Phase::Idle};
+    // Never reassigned: safe to use from any thread (stop() from a callback included).
+    std::stop_source stop_source_;
+    std::atomic<std::thread::id> worker_thread_; // set by the worker before its first callback
     std::unique_ptr<Worker> worker_;
-    std::jthread thread_;
+    std::thread thread_; // joined by stop(), which the destructor calls
 };
 
 } // namespace ieg::modbus

@@ -414,7 +414,18 @@ Mosquitto restart, and a clean SIGTERM shutdown.
 MVP 1 uses local anonymous OPC UA (security mode None) and unauthenticated MQTT for development
 convenience. Modbus TCP has no security at all (plaintext, no authentication); use it only on
 isolated networks. The MVP 2 demo (`compose.mvp2.yaml`, Modbus simulator) inherits all of this and
-is likewise not a production security configuration. The Compose demo publishes its ports on 127.0.0.1 only.
+is likewise not a production security configuration.
+
+libmodbus 3.1.10 (the Ubuntu 24.04 package) has open CVEs (no fixed release is known for
+CVE-2023-26793; CVE-2024-10918 is fixed upstream in 3.1.11). The
+gateway imports only libmodbus client functions (connect/close, the four read functions and
+settings), so the server-side CVE-2024-10918 (`modbus_reply`) and CVE-2024-34244
+(`modbus_write_bits`) are not reachable. CVE-2023-26793 (heap overflow reported in
+`read_io_status`, used by `modbus_read_bits`/`modbus_read_input_bits`) is on the read path of
+coils and discrete inputs: a malicious or compromised Modbus device is the attacker model. The
+gateway validates request quantities and passes exactly-sized buffers, and a fuzzing run against
+an AddressSanitizer build of libmodbus 3.1.10 with malformed responses found no memory error, but
+that is not proof. Connect the gateway only to trusted devices on isolated networks. The Compose demo publishes its ports on 127.0.0.1 only.
 
 This is explicitly not a production security configuration.
 

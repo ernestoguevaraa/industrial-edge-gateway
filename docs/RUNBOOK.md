@@ -520,7 +520,7 @@ docker compose -f compose.mvp2.yaml logs -f edge-gateway modbus-simulator
 | `plant-simulator` | `ieg/plant-simulator:mvp1` | `127.0.0.1:4840` | OPC UA plant simulator |
 | `modbus-simulator` | `ieg/modbus-simulator:mvp2` (built from `modbus-simulator/`) | `127.0.0.1:5020` | Modbus TCP compressor, unit ID 1 |
 | `mosquitto` | `eclipse-mosquitto:2.0.22` | `127.0.0.1:1883` | MQTT broker |
-| `edge-gateway` | `ieg/edge-gateway:mvp1` | none | gateway with the mixed configuration |
+| `edge-gateway` | `ieg/edge-gateway:mvp2` (same Dockerfile and sources as the MVP 1 demo) | none | gateway with the mixed configuration |
 
 Expected topics: the seven OPC UA topics of section 5 and eleven Modbus topics under
 `industrial/site01/line01/compressor01/`: `running`, `maintenance_mode`, `door_closed`,

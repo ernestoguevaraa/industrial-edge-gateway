@@ -43,6 +43,10 @@ services:
     extends:
       file: compose.yaml
       service: edge-gateway
+    # Own tag, so the two demos never overwrite each other's gateway image (same Dockerfile and
+    # sources; compose.yaml keeps ieg/edge-gateway:mvp1). The plant simulator keeps its MVP 1
+    # tag: it is the unchanged MVP 1 simulator.
+    image: ieg/edge-gateway:mvp2
     volumes:
       # Replaces the MVP 1 configuration mounted at the same path.
       - ./configs/gateway.mixed.example.yaml:/etc/ieg/gateway.yaml:ro

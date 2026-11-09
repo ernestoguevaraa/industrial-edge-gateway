@@ -173,11 +173,20 @@ shared library through the imported target `libmodbus::libmodbus`, privately to
 Mbed TLS from the same distribution, and dynamic linking keeps LGPL-2.1 compliance simple. CI,
 the gateway image build stage and the runbook install `libmodbus-dev`.
 
-Known issue: CVE-2024-10918 (fixed upstream in 3.1.11) affects libmodbus' **server** reply path
-(`modbus_reply`); Ubuntu's tracker still lists noble as "needs evaluation". The gateway only uses
-client calls, and the tests' Modbus server is a separate POSIX implementation that does not use
-libmodbus' server API. Re-evaluate when Ubuntu publishes a fixed package or before using
-libmodbus server functions.
+Known issues of the Ubuntu 24.04 package (its tracker lists noble as unpatched or "needs
+evaluation"; CVE-2024-10918 is fixed upstream in 3.1.11, while no fixed release is known for
+CVE-2023-26793):
+- CVE-2024-10918 (`modbus_reply`) and CVE-2024-34244 (`modbus_write_bits`): **not reachable**.
+  The gateway imports only libmodbus client functions (connect/close, `modbus_read_bits`,
+  `modbus_read_input_bits`, `modbus_read_registers`, `modbus_read_input_registers` and settings;
+  verified with `nm -D`), and the tests' Modbus server is a separate POSIX implementation.
+- CVE-2023-26793 (heap overflow reported in `read_io_status`): **on the read path** of coils and
+  discrete inputs. A malicious or compromised Modbus device is the attacker model. The gateway
+  limits quantities to the protocol maximum and passes exactly-sized buffers; fuzzing the four
+  read functions against an AddressSanitizer build of libmodbus 3.1.10 with randomly malformed
+  responses (about 12,000 connections) found no memory error. This is evidence, not proof:
+  connect only to trusted devices on isolated networks, and re-evaluate when a fixed libmodbus
+  is available.
 
 ### Interface and contract
 
@@ -294,7 +303,9 @@ runtime creates one per configured device.
 - Reconnection: after a failed connect or a lost connection, the worker waits
   `min(initial * 2^n, max)` (defaults 500 ms .. 30 s), multiplied by a jitter factor in
   `[1 - jitter, 1]` (default 0.2, seedable for deterministic tests), then reconnects explicitly.
-  The failure counter resets after a successful connection.
+  The failure counter resets only after a connection that delivered at least one successful
+  read, so a device that accepts TCP but never answers keeps backing off exponentially instead
+  of being reconnected at a fixed rate.
 
 ### Read grouping policy
 
@@ -302,9 +313,13 @@ runtime creates one per configured device.
   overlapping**; a request never covers an address that no requested point uses (no gaps), never
   mixes tables and never exceeds 125 registers / 2000 bits (configurable lower). Points are
   ordered by address; a 32-bit point is never split across requests.
-- If a multi-point block answers with a Modbus exception (e.g. 0x02 Illegal Data Address because
-  one address in the range is not implemented), the block is split into single-point reads
-  immediately (same cycle) and permanently, so one bad address only affects its own point.
+- If a multi-point block answers with a Modbus exception **about the request** — 0x01 Illegal
+  Function, 0x02 Illegal Data Address (e.g. one address in the range is not implemented) or 0x03
+  Illegal Data Value — the block is split into single-point reads immediately (same cycle) and
+  permanently, so one bad address only affects its own point. Other exception codes (0x04 device
+  failure, 0x06 busy, 0x0A/0x0B gateway path/target, ...) describe a transient device state: the
+  block's items are reported `Bad` with that code and the plan is kept, so an outage of a device
+  behind a Modbus gateway never multiplies the number of requests.
 - A timeout, connection loss or protocol error closes the connection (client contract): the items
   of the failed block and of the rest of the cycle get `Bad` with that diagnostic, `Disconnected`
   is reported, and the worker backs off before reconnecting. No request is retried within a

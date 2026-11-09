@@ -106,12 +106,18 @@ public:
           rng_(options.jitter_seed.value_or(std::random_device{}()))
     {}
 
-    [[nodiscard]] std::thread::id thread_id() const noexcept { return thread_id_.load(); }
+    // The worker thread holds a raw pointer to this object: it must never be copied or moved.
+    ~Worker() = default;
+    Worker(const Worker&) = delete;
+    Worker& operator=(const Worker&) = delete;
+    Worker(Worker&&) = delete;
+    Worker& operator=(Worker&&) = delete;
 
+    // `stop` comes from the owning source's stop_source, which is never reassigned, so stop()
+    // can request it from any thread, including (by mistake) from a callback.
     void run(const std::stop_token& stop) noexcept
     {
         try {
-            thread_id_ = std::this_thread::get_id();
             run_loop(stop);
         } catch (...) {
             // Only a throwing callback (a contract violation) or allocation failure gets here.
@@ -147,10 +153,15 @@ private:
                 }
                 continue;
             }
-            failures = 0;
             report(ConnectionState::Connected, "");
+            read_succeeded_ = false;
             if (poll_while_connected(*client, stop) == CycleOutcome::Stopped) {
                 break;
+            }
+            // The failure counter only resets after a connection that delivered data: a device
+            // that accepts TCP but never answers keeps backing off exponentially.
+            if (read_succeeded_) {
+                failures = 0;
             }
             // Connection closed after a failure (already reported): back off, then reconnect.
             if (!wait_backoff(failures++, stop)) {
@@ -173,6 +184,8 @@ private:
             problem = "the client factory returned no client";
         } catch (const std::exception& error) {
             problem = error.what();
+        } catch (...) {
+            problem = "unknown exception";
         }
         report(ConnectionState::Disconnected, "client_error: " + problem);
         return false;
@@ -193,8 +206,22 @@ private:
         }
     }
 
-    // Reads every block once. Blocks that answer with a Modbus exception are split into
-    // single-point blocks (in place, so later cycles keep the split).
+    // Exception codes that concern the request itself (function, address range, quantity): a
+    // smaller request can succeed, so the block is split. Other codes (0x04 device failure, 0x06
+    // busy, 0x0A/0x0B gateway problems, ...) describe the device's state and are transient: the
+    // block is reported Bad and kept, so the plan never degrades because of an outage.
+    static bool splits_block(const ModbusError& error) noexcept
+    {
+        constexpr std::uint8_t kIllegalFunction = 0x01;
+        constexpr std::uint8_t kIllegalDataValue = 0x03;
+        return error.kind == ModbusErrorKind::ModbusException && error.exception_code &&
+               *error.exception_code >= kIllegalFunction &&
+               *error.exception_code <= kIllegalDataValue;
+    }
+
+    // Reads every block once. Blocks that answer with an exception about the request (see
+    // splits_block) are split into single-point blocks (in place, so later cycles keep the
+    // split).
     CycleOutcome run_cycle(IModbusClient& client, const std::stop_token& stop)
     {
         std::size_t index = 0;
@@ -208,7 +235,7 @@ private:
                 continue;
             }
             const ModbusError& error = *result;
-            if (error.kind == ModbusErrorKind::ModbusException && plan_[index].points.size() > 1) {
+            if (splits_block(error) && plan_[index].points.size() > 1) {
                 auto singles = detail::split_block(plan_[index], points_);
                 plan_.erase(plan_.begin() + static_cast<std::ptrdiff_t>(index));
                 plan_.insert(plan_.begin() + static_cast<std::ptrdiff_t>(index),
@@ -239,6 +266,7 @@ private:
             if (!result.ok()) {
                 return result.error();
             }
+            read_succeeded_ = true;
             emit_decoded(block, result.value());
             return std::nullopt;
         }
@@ -247,6 +275,7 @@ private:
         if (!result.ok()) {
             return result.error();
         }
+        read_succeeded_ = true;
         emit_decoded(block, result.value());
         return std::nullopt;
     }
@@ -324,7 +353,7 @@ private:
     std::mt19937_64 rng_;
     std::vector<std::uint16_t> registers_;
     std::vector<std::uint8_t> bits_;
-    std::atomic<std::thread::id> thread_id_; // value-initialized (no thread)
+    bool read_succeeded_{false}; // since the current connection was established
 };
 
 // ---- ModbusTcpSource -----------------------------------------------------------------------
@@ -397,8 +426,13 @@ void ModbusTcpSource::start(std::vector<acquisition::Item> items, acquisition::C
     worker_ = std::make_unique<Worker>(device_, factory_, options_, clock_, std::move(planned),
                                        std::move(callbacks));
     try {
-        thread_ =
-            std::jthread([raw = worker_.get()](const std::stop_token& stop) { raw->run(stop); });
+        // The thread ID is published by the worker before its first callback, so stop() can
+        // recognise a call from a callback without touching thread_ (assigned concurrently).
+        thread_ = std::thread(
+            [raw = worker_.get(), stop = stop_source_.get_token(), id = &worker_thread_] {
+                id->store(std::this_thread::get_id());
+                raw->run(stop);
+            });
     } catch (...) {
         phase_ = Phase::Stopped; // nothing runs; the single start is consumed
         throw;
@@ -409,16 +443,18 @@ void ModbusTcpSource::start(std::vector<acquisition::Item> items, acquisition::C
 void ModbusTcpSource::stop() noexcept
 {
     try {
-        if (worker_ && std::this_thread::get_id() == worker_->thread_id()) {
+        if (std::this_thread::get_id() == worker_thread_.load()) {
             // Precondition violation (called from a callback): joining would self-deadlock.
-            thread_.request_stop();
+            // Only request the stop; the owner's stop() or the destructor joins.
+            stop_source_.request_stop();
             return;
         }
         const std::lock_guard lock(lifecycle_mutex_);
         phase_ = Phase::Stopped;
+        stop_source_.request_stop(); // ends waits at once; a request in progress completes first
         if (thread_.joinable()) {
-            thread_.request_stop(); // ends waits at once; a request in progress completes first
-            thread_.join();         // after this no callback can run
+            thread_.join();                          // after this no callback can run
+            worker_thread_.store(std::thread::id{}); // the ID may be reused by another thread
         }
     } catch (...) {
         std::terminate(); // only reachable if locking or joining fails
