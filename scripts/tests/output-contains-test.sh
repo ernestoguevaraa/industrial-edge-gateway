@@ -20,6 +20,14 @@ check() { # description, expected status, actual status
         failures=$((failures + 1))
     fi
 }
+check_fails() { # description, actual status: any non-zero status
+    if [[ "$2" != 0 ]]; then
+        echo "ok   - $1 (status $2)"
+    else
+        echo "FAIL - $1 (expected a non-zero status, got 0)"
+        failures=$((failures + 1))
+    fi
+}
 
 # The simulator's log: the searched line comes first, then a lot of other output.
 needle_then_bulk() {
@@ -53,11 +61,25 @@ status=0
 output_contains "$NEEDLE" failing_command 2>/dev/null || status=$?
 check "a failing command is reported, not hidden" 2 "$status"
 
-# Documents the defect being guarded against: the old pattern fails (SIGPIPE, 141) although the
-# text is present.
+# The same with SIGPIPE ignored, as on GitHub Actions runners (Node ignores SIGPIPE and children
+# inherit that): writes after grep's exit then fail with EPIPE instead of killing the producer.
 status=0
-needle_then_bulk | grep -q -- "$NEEDLE" || status=$?
-check "old pattern 'cmd | grep -q' fails under pipefail despite a match" 141 "$status"
+(trap '' PIPE && output_contains "$NEEDLE" needle_then_bulk) 2>/dev/null || status=$?
+check "found before large output with SIGPIPE ignored (CI runners)" 0 "$status"
+
+status=0
+(trap '' PIPE && output_contains '"event": "never"' needle_then_bulk) 2>/dev/null || status=$?
+check "missing text not found with SIGPIPE ignored" 1 "$status"
+
+# Documents the defect being guarded against: the old pattern fails although the text is present,
+# with 141 (SIGPIPE) by default or 1 (EPIPE write error) where SIGPIPE is ignored.
+status=0
+needle_then_bulk 2>/dev/null | grep -q -- "$NEEDLE" || status=$?
+check_fails "old pattern 'cmd | grep -q' fails under pipefail despite a match" "$status"
+
+status=0
+(trap '' PIPE && needle_then_bulk | grep -q -- "$NEEDLE") 2>/dev/null || status=$?
+check_fails "old pattern also fails with SIGPIPE ignored" "$status"
 
 ((failures == 0)) || { echo "$failures check(s) failed"; exit 1; }
 echo "PASS: output_contains"
