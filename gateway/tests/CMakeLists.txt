@@ -28,6 +28,7 @@ add_executable(
   opcua/ua_conversion_test.cpp
   output/publish_result_test.cpp
   output/telemetry_publisher_mock_test.cpp
+  persistence/sqlite_message_store_test.cpp
   runtime/gateway_runtime_test.cpp
   runtime/multi_source_runtime_test.cpp
   runtime/opcua_source_runtime_test.cpp
@@ -48,9 +49,11 @@ target_link_libraries(
           gateway_opcua_api
           gateway_opcua_open62541
           gateway_output_api
+          gateway_persistence
           gateway_runtime
           eclipse-paho-mqtt-c::paho-mqtt3a-static
           open62541
+          SQLite::SQLite3
           GTest::gmock
           GTest::gtest_main)
 target_compile_definitions(

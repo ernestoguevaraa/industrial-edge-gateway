@@ -7,9 +7,11 @@
 FROM ubuntu:24.04 AS build
 ARG DEBIAN_FRONTEND=noninteractive
 # libmodbus-dev: libmodbus 3.1.10 for the Modbus TCP sources (exact version checked by CMake).
+# libsqlite3-dev: required to configure the project (persistent message store). The gateway
+# executable does not link it yet, so the runtime stage needs no SQLite library for now.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates cmake g++ libmbedtls-dev libmodbus-dev ninja-build \
+        ca-certificates cmake g++ libmbedtls-dev libmodbus-dev libsqlite3-dev ninja-build \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY CMakeLists.txt ./

@@ -31,9 +31,10 @@ jobs:
       - name: Install build dependencies
         # libmbedtls-dev: required by the official open62541 amalgamation (see cmake/Dependencies.cmake).
         # libmodbus-dev: libmodbus 3.1.10 for the Modbus TCP client (pinned by version check in CMake).
+        # libsqlite3-dev: SQLite (>= 3.35) for the persistent message store (MVP 3).
         # mosquitto: broker binary for the MQTT publisher integration tests.
         run: |
-          sudo apt-get update && sudo apt-get install -y ninja-build libmbedtls-dev libmodbus-dev mosquitto
+          sudo apt-get update && sudo apt-get install -y ninja-build libmbedtls-dev libmodbus-dev libsqlite3-dev mosquitto
           echo "IEG_MOSQUITTO=/usr/sbin/mosquitto" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v7
@@ -152,7 +153,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy-18 libmbedtls-dev libmodbus-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy-18 libmbedtls-dev libmodbus-dev libsqlite3-dev
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja

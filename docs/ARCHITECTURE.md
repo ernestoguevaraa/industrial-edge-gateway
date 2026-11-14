@@ -261,6 +261,44 @@ convention (zero-based offsets, big-endian bytes, explicit word order for 32-bit
 documented in `docs/MVP2_MODBUS_DESIGN.md`; `configs/gateway.mixed.example.yaml` is a mixed
 example.
 
+### 2.8 Message Store (MVP 3, not yet wired into the runtime)
+
+Implementation: `SqliteMessageStore` (target `gateway_persistence`, header
+`ieg/persistence/message_store.hpp`). The header is SDK-neutral; SQLite is linked privately.
+
+A persistent, bounded FIFO of outgoing messages (topic + opaque payload bytes) in a local SQLite
+file, the building block for store-and-forward while the MQTT broker is unreachable:
+
+```sql
+CREATE TABLE pending_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,  -- FIFO order; never reused
+    topic TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL,        -- Unix epoch, UTC
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+```
+
+- `enqueue()` appends; `peek(n, after)` reads the oldest messages without removing them;
+  `acknowledge(ids)` deletes them once delivery is confirmed; `record_attempt(ids)` counts failed
+  attempts. A crash between publish and acknowledge re-publishes the message after the restart
+  (at-least-once, possible duplicates, consistent with QoS 1).
+- Limits: `max_messages` and `max_bytes` (topic + payload bytes, not the file size). Overflow
+  policy `DropOldest` (default, like the in-memory queue) or `RejectNew`; a single message larger
+  than `max_bytes` is always rejected. A backlog exceeding limits lowered since the last run is
+  trimmed at open under `DropOldest`.
+- Durability: WAL journal; `SyncMode::Full` (default, fsync per modifying call, survives power
+  loss) or `Normal` (survives process crashes; fewer fsyncs for flash storage).
+- Recovery at open: SQLite recovers the write-ahead log, `PRAGMA quick_check` verifies the file,
+  and the backlog (order, timestamps, attempts) is available again. The schema version is kept in
+  `PRAGMA user_version`; unknown versions and foreign databases are refused without modifying
+  them. The open store holds an exclusive lock, so a second instance on the same file fails
+  (`StoreErrorKind::Busy`).
+- Thread-safe (one internal mutex); every call blocks on disk I/O.
+
+Configuration through the YAML file and the integration with `GatewayRuntime` follow in later
+tasks; until then the store is built and unit-tested but not used by the gateway executable.
+
 ## 3. Threading Model
 
 Implemented model:
@@ -369,6 +407,10 @@ transitions and a periodic summary (delivered, dropped and failed counts, queue 
 - The Modbus TCP acquisition source (`ModbusTcpSource`: read grouping, polling schedule,
   reconnection, shutdown) with a fake device and a manual clock, and against the in-process
   server
+- The SQLite message store on real temporary files: schema, FIFO order, exact payload bytes,
+  acknowledge/attempts, both overflow policies and byte/message limits, reopen and recovery after
+  a simulated crash (a child process exits without closing the database), trimming to lowered
+  limits, id non-reuse, exclusive locking, corrupt/foreign/newer-version files, concurrency
 
 ### Integration tests
 
@@ -437,7 +479,8 @@ TLS, certificates and mTLS are planned for a later milestone.
 MVP 1  OPC UA -> MQTT                      (v0.1.0, implemented)
 MVP 2  Modbus + common acquisition model   (implemented, unreleased: acquisition API, config,
                                             decoder, TCP client, polling, multi-source runtime)
-MVP 3  SQLite store-and-forward
+MVP 3  SQLite store-and-forward            (in progress: message store implemented; YAML
+                                            configuration and runtime integration pending)
 MVP 4  metrics / observability
 v1.0   ISA-95 asset modeling + failure scenarios
 v1.1   TLS/mTLS

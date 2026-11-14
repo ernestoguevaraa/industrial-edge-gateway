@@ -91,6 +91,12 @@ set_target_properties(libmodbus::libmodbus PROPERTIES IMPORTED_LOCATION "${LIBMO
                                                       INTERFACE_INCLUDE_DIRECTORIES "${LIBMODBUS_INCLUDE_DIR}")
 message(STATUS "libmodbus ${libmodbus_found_version}: ${LIBMODBUS_LIBRARY}")
 
+# SQLite (persistent store-and-forward message store, MVP 3): the system library (Ubuntu 24.04:
+# libsqlite3-dev, SQLite 3.45.1), public domain, linked dynamically. 3.35 is the minimum the store
+# needs (DELETE ... RETURNING); the store re-checks the runtime library version when it opens.
+find_package(SQLite3 3.35 REQUIRED)
+message(STATUS "SQLite ${SQLite3_VERSION}: ${SQLite3_LIBRARIES}")
+
 find_package(Threads REQUIRED)
 add_library(open62541 STATIC "${open62541_source_SOURCE_DIR}/open62541.c")
 target_include_directories(open62541 SYSTEM PUBLIC "${open62541_header_SOURCE_DIR}")

@@ -71,6 +71,13 @@ target_link_libraries(gateway_mqtt PUBLIC gateway_output_api PRIVATE eclipse-pah
                                                                      spdlog::spdlog)
 gateway_set_warnings(gateway_mqtt)
 
+# Persistent store-and-forward message store (SQLite). The public header is SDK-neutral and SQLite
+# is linked PRIVATE so it cannot leak into dependants. Not yet wired into the runtime.
+add_library(gateway_persistence STATIC src/persistence/sqlite_message_store.cpp)
+target_include_directories(gateway_persistence PUBLIC include)
+target_link_libraries(gateway_persistence PRIVATE SQLite::SQLite3)
+gateway_set_warnings(gateway_persistence)
+
 # Gateway core primitives (header-only).
 add_library(gateway_core INTERFACE)
 target_include_directories(gateway_core INTERFACE include)

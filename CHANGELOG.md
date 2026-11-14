@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — MVP 3: SQLite store-and-forward (in progress)
+
+### Added
+
+- **Persistent message store** (`ieg::persistence::SqliteMessageStore`, target
+  `gateway_persistence`): a bounded FIFO of outgoing messages (topic + payload) in a local SQLite
+  file (`pending_messages` table; ids give the FIFO order and are never reused). Enqueue, peek
+  (with a resume point), acknowledge (delete on confirmed delivery), per-message attempt counter,
+  message and byte limits with `DropOldest`/`RejectNew` overflow policies, WAL journal with
+  selectable `synchronous` level, recovery of the backlog after restart or crash, integrity check,
+  schema versioning and an exclusive file lock. Not yet configurable from YAML nor used by the
+  gateway runtime. Unit tests in `gateway_tests`.
+- Build prerequisite: `libsqlite3-dev` (SQLite >= 3.35, checked by CMake).
+
 ## v0.2.0 — MVP 2: Modbus TCP acquisition (release candidate, not yet tagged)
 
 Release notes and upgrade guide: [RELEASE_NOTES_v0.2.0.md](RELEASE_NOTES_v0.2.0.md).
